@@ -1,0 +1,23 @@
+[project]
+name = "amia2025-stt-benchmarking"
+version = "0.1.0"
+description = "Benchmarking STT models for historical audio"
+authors = [{ name="Arthur Cho", email="hello@memoirji.com" }]
+dependencies = [
+    "transformers",
+    "torchaudio",
+    "datasets",
+    "evaluate",
+    "wandb",
+    "duckdb",
+    "azure-storage-blob",
+    "pytest",
+    "ruff"
+]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I"]  # lint, formatting, import sorting
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
