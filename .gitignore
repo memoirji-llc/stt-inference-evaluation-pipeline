@@ -1,3 +1,6 @@
+#azure cloud
+infra/azure/env.local.sh
+
 # Mac OS specific
 .DS_Store
 
