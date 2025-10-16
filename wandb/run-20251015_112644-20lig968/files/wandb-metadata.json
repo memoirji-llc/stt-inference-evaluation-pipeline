@@ -1,0 +1,17 @@
+{
+  "os":  "macOS-15.5-arm64-arm-64bit",
+  "python":  "CPython 3.12.9",
+  "startedAt":  "2025-10-15T16:26:44.304783Z",
+  "program":  "/Users/ac/main/amia2025-stt-benchmarking/scripts/run_whisper.py",
+  "codePath":  "scripts/run_whisper.py",
+  "codePathLocal":  "scripts/run_whisper.py",
+  "git":  {
+    "remote":  "https://github.com/biographs-ai/amia2025-stt-benchmarking.git",
+    "commit":  "2d47d8f29dea75a48ca58ce0da5151c327c6f813"
+  },
+  "email":  "hello@memoirji.com",
+  "root":  "/Users/ac/main/amia2025-stt-benchmarking",
+  "host":  "ac-mbp.local",
+  "executable":  "/Users/ac/main/amia2025-stt-benchmarking/.venv/bin/python",
+  "writerId":  "vq0oqqwz344uohhcipht0bhzqaw3z4a5"
+}
