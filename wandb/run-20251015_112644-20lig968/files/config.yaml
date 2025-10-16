@@ -1,0 +1,40 @@
+_wandb:
+    value:
+        cli_version: 0.22.0
+        e:
+            vq0oqqwz344uohhcipht0bhzqaw3z4a5:
+                codePath: scripts/run_whisper.py
+                codePathLocal: scripts/run_whisper.py
+                email: hello@memoirji.com
+                executable: /Users/ac/main/amia2025-stt-benchmarking/.venv/bin/python
+                git:
+                    commit: 2d47d8f29dea75a48ca58ce0da5151c327c6f813
+                    remote: https://github.com/biographs-ai/amia2025-stt-benchmarking.git
+                host: ac-mbp.local
+                os: macOS-15.5-arm64-arm-64bit
+                program: /Users/ac/main/amia2025-stt-benchmarking/scripts/run_whisper.py
+                python: CPython 3.12.9
+                root: /Users/ac/main/amia2025-stt-benchmarking
+                startedAt: "2025-10-15T16:26:44.304783Z"
+                writerId: vq0oqqwz344uohhcipht0bhzqaw3z4a5
+        m: []
+        python_version: 3.12.9
+        t:
+            "3":
+                - 16
+            "4": 3.12.9
+            "5": 0.22.0
+            "12": 0.22.0
+            "13": darwin-arm64
+audio_dir:
+    value: data/processed/
+batch_size:
+    value: 4
+language:
+    value: en
+model_name:
+    value: whisper
+output_file:
+    value: results/transcripts_whisper.csv
+variant:
+    value: base

@@ -1,0 +1,6 @@
+model_name: whisper
+variant: base
+language: en
+audio_dir: data/processed/
+output_file: results/transcripts_whisper.csv
+batch_size: 4
