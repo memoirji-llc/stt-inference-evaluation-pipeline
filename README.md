@@ -1,7 +1,6 @@
 # amia2025-stt-benchmarking
 
-# amia2025-stt-benchmarking
-
+## introduction
 Benchmarking open-source speech-to-text models (Whisper, Wav2Vec2, MMS) on historical audio such as radio shows, cassette digitizations, and oral history recordings.
 
 This project supports a paper accepted to AMIA 2025 and aims to create a reproducible, professional-grade benchmark pipeline for degraded analog-era audio.
@@ -27,3 +26,79 @@ logs/           # System + training logs (auto-generated)
 notebooks/      # Jupyter playgrounds (for exploration only)
 
 docs/           # MkDocs or other docs
+
+## Current VMs (Azure)
+| Alias | Azure Name | Purpose | Specs | State |
+|--------|-------------|----------|--------|--------|
+| `vm-amia-preproc` | `vm-amia-t4-cpu` | CPU preprocessing | D4s_v5 | Deallocated |
+| `vm-amia-gpu` | `vm-amia-t4` | GPU inference/fine-tuning | NC4as_T4_v3 | On demand |
+
+## Connect to VMs via Remote-SSH
+VS Code: *Remote-SSH → Connect to Host → amia-gpu*; open
+```
+/home/arthur/projects/amia2025-stt-benchmarking
+```
+Terminal:
+```
+ssh arthur@172.191.111.144
+```
+GPU VM: 
+```
+ssh amia-gpu
+```
+CPU VM ("backup" VM): 
+```
+ssh amia-preproc
+```
+(*ssh alias in `~/.ssh/config`)
+<!-- - Streamlit/Gradio: open http://localhost:8501 (tunneled via `LocalForward 8501 127.0.0.1:8501`) -->
+
+## Azure CLI - VM
+check current VM status:
+`az vm list -d -o table`
+deallocate VM when done:
+`az vm deallocate -g rg-amia-ml -n vm-amia-t4`
+list all vms: 
+`az vm list-sizes --location eastus -o table`
+confirm rg status:
+`az group show -n rg-amia-ml -o table`
+
+## Azure CLI - Storage Access
+On VM:
+
+`az login --identity --allow-no-subscriptions`
+`export STG=stgamiadata26828`
+`az storage blob list --account-name "$STG" --container-name audio-raw --auth-mode login -o table`
+
+Grant VM access from Local:
+
+1.Vars
+```
+SUB=$(az account show --query id -o tsv)
+```
+```
+SCOPE="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$STG"
+```
+```
+PRINCIPAL_ID=$(az vm show -g "$RG" -n "vm-amia-t4" --query "identity.principalId" -o tsv)
+```
+2.Allow the VM’s identity to read/write blobs
+```az role assignment create \
+  --assignee-object-id "$PRINCIPAL_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" \
+  --scope "$SCOPE"
+```
+3.(optional) If you also want the identity to “see” the subscription in az account show:
+```
+az role assignment create \
+  --assignee-object-id "$PRINCIPAL_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Reader" \
+  --scope "/subscriptions/$SUB"
+```
+
+## Points to note:
+- “RBAC = identity-based, needs a role.
+Connection string = key-based, works anywhere.”
+- CUDA (Compute Unified Device Architecture) is NVIDIA’s programming interface that lets your Python libraries (like PyTorch or Whisper) talk directly to the GPU.
