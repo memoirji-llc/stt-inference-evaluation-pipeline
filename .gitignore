@@ -1,3 +1,6 @@
+# Ignore local VS Code settings
+.vscode/
+
 #azure cloud
 infra/azure/env.local.sh
 
