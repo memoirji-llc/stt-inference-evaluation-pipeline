@@ -4,6 +4,12 @@
 #azure cloud
 infra/azure/env.local.sh
 
+#locally installed models
+models/local/
+
+#data directory
+data/
+
 # Mac OS specific
 .DS_Store
 
