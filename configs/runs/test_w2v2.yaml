@@ -1,0 +1,14 @@
+experiment_id: test-w2v2-01
+model:
+  name: "wav2vec2"
+  dir: "./models/local/facebook--wav2vec2-base-960h"
+input:
+  audio_glob: "/Users/ac/main/amia2025-stt-benchmarking/data/audio/testing/*.mp3"
+  duration_sec: 120
+  sample_rate: 16000
+output:
+  dir: "outputs/testing/w2v2"
+wandb:
+  project: amia-stt
+  group: pilot-wav2vec2-test-01
+  tags: ["wav2vec2_test"]
