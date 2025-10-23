@@ -8,7 +8,12 @@ infra/azure/env.local.sh
 models/
 
 #data directory
-data/
+data/*.*
+data/audio
+data/old_broadcast
+data/processed
+data/raw
+data/veterans_history_project_sample_processed
 
 #wandb
 wandb/
