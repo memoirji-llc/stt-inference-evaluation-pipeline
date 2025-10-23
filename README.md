@@ -102,3 +102,29 @@ az role assignment create \
 - “RBAC = identity-based, needs a role.
 Connection string = key-based, works anywhere.”
 - CUDA (Compute Unified Device Architecture) is NVIDIA’s programming interface that lets your Python libraries (like PyTorch or Whisper) talk directly to the GPU.
+
+
+## Environment setup with `uv`:
+To activate virtual environment in terminal:
+`source .venv/bin/activate`
+Make sure notebook can be run:
+`uv add --dev ipykernel`
+
+Testing PyTorch + MPS + torchaudio:
+1.
+```
+uv pip install "torchvision==0.24.*"
+```
+2. 
+```
+uv run python - <<'PY'
+import torch, torchaudio
+print("torch:", torch.__version__, "| mps:", torch.backends.mps.is_available())
+waveform = torch.randn(1, 16000)  # 1s fake audio
+resamp = torchaudio.transforms.Resample(16000, 8000)
+print("resampled shape:", resamp(waveform).shape)
+PY
+```
+
+Run jupyter lab:
+`uv run --with jupyter jupyter lab`
