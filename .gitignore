@@ -10,6 +10,12 @@ models/
 #data directory
 data/
 
+#wandb
+wandb/
+
+#outputs
+outputs/
+
 # Mac OS specific
 .DS_Store
 
