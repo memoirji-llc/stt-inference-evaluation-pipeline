@@ -128,3 +128,6 @@ PY
 
 Run jupyter lab:
 `uv run --with jupyter jupyter lab`
+
+Download model
+`uv run hf download facebook/wav2vec2-base-960h --local-dir ./models/local/facebook--wav2vec2-base-960h`
