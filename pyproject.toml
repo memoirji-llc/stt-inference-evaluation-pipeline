@@ -2,22 +2,55 @@
 name = "amia2025-stt-benchmarking"
 version = "0.1.0"
 description = "Benchmarking STT models for historical audio"
-authors = [{ name="Arthur Cho", email="hello@memoirji.com" }]
+authors = [{ name = "Arthur Cho", email = "hello@memoirji.com" }]
+requires-python = ">=3.10"
+
+# Core libs used everywhere
 dependencies = [
-    "transformers",
-    "torchaudio",
-    "datasets",
-    "evaluate",
-    "wandb",
-    "duckdb",
-    "azure-storage-blob",
-    "pytest",
-    "ruff"
+  "transformers",
+  "datasets", # HF datasets (not your package name)
+  "evaluate",
+  "wandb",
+  "duckdb",
+  "azure-storage-blob",
+  "pandas>=2.3.0",
+  "pyarrow>=20.0.0",
+  "requests>=2.32.3",
+  "scipy>=1.15.3",
+  "pydub>=0.25.1",
+  "soundfile>=0.13.1",
+  "librosa>=0.10.2",
+  "jiwer>=3.0.4",
+  "beautifulsoup4>=4.14.2",
+  "lxml>=6.0.2",
+  "faster-whisper>=1.2.0",
+]
+
+[dependency-groups]
+dev = [
+  "ipykernel>=6.29.5",
+  "pytest>=8.3.0",
+  "ruff>=0.6.9"
+]
+
+data = [
+  "polars>=1.30.0",
+  "matplotlib>=3.10.3"
+]
+
+train = [
+  "accelerate>=1.8.1",
+  "torchvision>=0.22.1"      # optional; keep here if you truly need it
+  # NOTE: torch/torchaudio installed per-machine (see below)
+]
+
+cloud = [
+  "azure-identity>=1.17.0",
 ]
 
 [tool.ruff]
 line-length = 100
-select = ["E", "F", "I"]  # lint, formatting, import sorting
+select = ["E", "F", "I"]  # lint + isort
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
