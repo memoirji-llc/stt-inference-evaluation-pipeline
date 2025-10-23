@@ -1,0 +1,12 @@
+model_list:
+- model_name: whisper
+  litellm_params:
+    model: azure/azure-whisper
+    api_version: 2024-02-15-preview
+    api_base: os.environ/AZURE_OPENAI_ENDPOINT
+    api_key: os.environ/AZURE_OPENAI_API_KEY
+  model_info:
+    mode: audio_transcription
+
+general_settings:
+  master_key: sk-1234
