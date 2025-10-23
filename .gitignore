@@ -4,8 +4,8 @@
 #azure cloud
 infra/azure/env.local.sh
 
-#locally installed models
-models/local/
+#models directory
+models/
 
 #data directory
 data/
