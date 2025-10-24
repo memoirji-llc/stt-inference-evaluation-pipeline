@@ -4,6 +4,7 @@ from typing import Optional
 import requests
 import pandas as pd
 from tqdm import tqdm
+import argparse
 
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.identity import DefaultAzureCredential
@@ -143,6 +144,11 @@ def upload_media_to_blob(df: pd.DataFrame,
             print(f"[{idx}] FAILED {media_type} → {media_url}: {e}")
 
 # ---- example usage ----
+parser = argparse.ArgumentParser(description="parsing vairables for data input and storage")
+parser.add_argument("--parquet", type=str, help="path to the dataframe (parquet) which contains urls to resources")
+parser.add_argument("--prefix", type=str, help="prefix to be created on az blob")
+args = parser.parse_args()
+
 if __name__ == "__main__":
-    df = pd.read_parquet("data/raw/loc/veterans_history_project_resources.parquet")
-    upload_media_to_blob(df, prefix="unknown")
+    df = pd.read_parquet(args.parquet)
+    upload_media_to_blob(df, prefix=args.prefix)
