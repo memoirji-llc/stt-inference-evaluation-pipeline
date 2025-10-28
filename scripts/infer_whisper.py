@@ -96,12 +96,19 @@ def run(cfg):
     with open(hyp_path, "w") as hout:
         for item in tqdm(manifest, desc="Transcribing"):
             file_id = item["file_id"]
-            source_path = item["blob_path"]
             collection_num = item["collection_number"]
+
+            # Handle both old format (single blob_path) and new format (blob_path_candidates list)
+            if "blob_path_candidates" in item:
+                source_paths = item["blob_path_candidates"]
+            elif "blob_path" in item:
+                source_paths = [item["blob_path"]]
+            else:
+                print(f"\n[{file_id}] ERROR: No blob path found in manifest")
+                continue
 
             # Log attempt
             print(f"\n[{file_id}] Processing: {collection_num}")
-            print(f"  Blob path: {source_path}")
 
             try:
                 # Load audio
@@ -109,7 +116,23 @@ def run(cfg):
 
                 # Download and check file size if Azure blob
                 if source_type == "azure_blob":
-                    audio_bytes = azure_utils.download_blob_to_memory(source_path)
+                    # Try each candidate path until one succeeds
+                    audio_bytes = None
+                    successful_path = None
+
+                    for source_path in source_paths:
+                        try:
+                            print(f"  Trying: {source_path}")
+                            audio_bytes = azure_utils.download_blob_to_memory(source_path)
+                            successful_path = source_path
+                            print(f"  ✓ Found: {source_path}")
+                            break
+                        except Exception as e:
+                            print(f"    × Not found: {source_path}")
+                            continue
+
+                    if audio_bytes is None:
+                        raise FileNotFoundError(f"None of the candidate paths exist: {source_paths}")
                     file_size_mb = len(audio_bytes) / (1024 * 1024)
                     print(f"  Downloaded: {file_size_mb:.2f} MB")
 
@@ -146,6 +169,9 @@ def run(cfg):
                     actual_duration = len(wave) / sample_rate
                 else:
                     # Load from local file (also use pydub for consistency)
+                    # For local files, just use the first path (should only be one)
+                    source_path = source_paths[0]
+                    print(f"  File: {source_path}")
                     print(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
                     audio_segment = AudioSegment.from_file(source_path)
                     audio_segment = audio_segment.set_channels(1)

@@ -62,9 +62,11 @@ def load_vhp_dataset(
     return df
 
 
-def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") -> Optional[str]:
+def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") -> List[str]:
     """
-    Construct Azure blob path for a given row.
+    Construct possible Azure blob paths for a given row.
+    Returns a list of candidate paths to try, in order of preference.
+
     Matches the naming convention from loc_vhp_2_az_blob.py:
     {prefix}/{idx}/{media_type}.{ext}
 
@@ -74,17 +76,27 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
         blob_prefix: Blob storage prefix (default: "vhp")
 
     Returns:
-        Blob path string, or None if no media available
+        List of blob path candidates (empty if no media available)
     """
-    # Prefer video, fallback to audio
-    if pd.notnull(row.get('video_url')) and str(row['video_url']).strip():
-        # Assuming .mp4 extension for videos
-        return f"{blob_prefix}/{idx}/video.mp4"
-    elif pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip():
-        # Assuming .mp3 extension for audio
-        return f"{blob_prefix}/{idx}/audio.mp3"
-    else:
-        return None
+    candidates = []
+
+    # Build list of candidate paths based on what URLs exist in the row
+    # IMPORTANT: Upload script prefers video, but uploads can fail.
+    # Sometimes only audio gets uploaded even when video_url exists.
+    # So we try BOTH paths if either URL exists in the parquet.
+    has_video = pd.notnull(row.get('video_url')) and str(row['video_url']).strip()
+    has_audio = pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip()
+
+    # Try video first if video_url exists
+    if has_video:
+        candidates.append(f"{blob_prefix}/{idx}/video.mp4")
+
+    # Try audio as fallback (or first choice if no video_url)
+    if has_audio or has_video:
+        # Even if only video_url exists, try audio too (upload might have failed/partial)
+        candidates.append(f"{blob_prefix}/{idx}/audio.mp3")
+
+    return candidates
 
 
 def prepare_inference_manifest(
@@ -109,9 +121,9 @@ def prepare_inference_manifest(
     manifest = []
 
     for idx, row in df.iterrows():
-        blob_path = get_blob_path_for_row(row, idx, blob_prefix)
+        blob_path_candidates = get_blob_path_for_row(row, idx, blob_prefix)
 
-        if blob_path is None:
+        if not blob_path_candidates:
             continue
 
         # Extract ground truth transcript if available
@@ -126,7 +138,7 @@ def prepare_inference_manifest(
 
         manifest.append({
             'file_id': idx,
-            'blob_path': blob_path,
+            'blob_path_candidates': blob_path_candidates,  # Now a list of paths to try
             'collection_number': row.get('collection_number', f'unknown_{idx}'),
             'ground_truth': gt_text,
             'title': row.get('title', ''),
