@@ -47,9 +47,15 @@ def run(cfg):
     model_file_dir = str(model_snap)
     print(f"Loading model from: {model_file_dir}")
 
+    # Get device and compute type from config
+    device = cfg["model"].get("device", "auto")
+    compute_type = cfg["model"].get("compute_type", "default")
+
+    print(f"Device: {device}, Compute type: {compute_type}")
+
     # Use batched pipeline if batch_size specified
     batch_size = cfg["model"].get("batch_size", 1)
-    base_model = WhisperModel(model_file_dir, device="auto")
+    base_model = WhisperModel(model_file_dir, device=device, compute_type=compute_type)
 
     if batch_size > 1:
         model = BatchedInferencePipeline(model=base_model)
