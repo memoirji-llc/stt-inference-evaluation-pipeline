@@ -37,6 +37,9 @@ def main():
     ap.add_argument("--configs", nargs="+", required=True, help="Config YAML files to process")
     ap.add_argument("--parquet", required=False, help="Path to parquet with ground truth (new workflow)")
     ap.add_argument("--ref", required=False, help="Reference ground truth text file (legacy workflow)")
+
+    # CLI overrides (optional)
+    ap.add_argument("--model-dir", required=False, help="Override model directory from config")
     args = ap.parse_args()
 
     # Determine workflow type
@@ -45,14 +48,19 @@ def main():
     for config_path in args.configs:
         print(f"\n{'='*60}")
         print(f"PROCESSING: {config_path}")
+        if args.model_dir:
+            print(f"MODEL OVERRIDE: {args.model_dir}")
         print(f"{'='*60}")
 
         # Step 1: Run inference
         print(f"\n=== STEP 1: INFERENCE ===")
-        result = subprocess.run(
-            ["uv", "run", "python", "scripts/run_inference.py", "--config", config_path],
-            check=True
-        )
+
+        # Build inference command with optional overrides
+        inference_cmd = ["uv", "run", "python", "scripts/run_inference.py", "--config", config_path]
+        if args.model_dir:
+            inference_cmd.extend(["--model-dir", args.model_dir])
+
+        result = subprocess.run(inference_cmd, check=True)
 
         # Step 2: Get output paths
         paths = get_output_paths(config_path)

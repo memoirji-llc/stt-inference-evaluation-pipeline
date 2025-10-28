@@ -4,10 +4,19 @@ from pathlib import Path
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
+    ap.add_argument("--model-dir", required=False, help="Override model directory from config")
     args = ap.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    # Apply CLI overrides
+    if args.model_dir:
+        print(f"[OVERRIDE] Using model directory: {args.model_dir}")
+        cfg["model"]["dir"] = args.model_dir
+        # Update experiment_id to reflect override
+        model_name = Path(args.model_dir).name.replace("models--Systran--faster-", "")
+        cfg["experiment_id"] = f"{cfg['experiment_id']}-override-{model_name}"
 
     wandb.init(project=cfg["wandb"]["project"],
                config=cfg, group=cfg["wandb"].get("group"),
