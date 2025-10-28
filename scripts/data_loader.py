@@ -80,20 +80,23 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     """
     candidates = []
 
-    # Build list of candidate paths based on what URLs exist in the row
-    # IMPORTANT: Upload script prefers video, but uploads can fail.
-    # Sometimes only audio gets uploaded even when video_url exists.
-    # So we try BOTH paths if either URL exists in the parquet.
+    # CRITICAL: After sampling + reset_index, the row index (0-9) doesn't match
+    # the original parquet index that was used during upload.
+    # The upload script used the ORIGINAL parquet indices (0-10432), but
+    # we're using RESET indices (0-9) after sampling.
+    # So we CANNOT trust the parquet URLs to predict what blob path exists!
+    #
+    # Solution: Always try BOTH video.mp4 AND audio.mp3 for each index.
+    # This way we'll find whatever actually got uploaded.
+
     has_video = pd.notnull(row.get('video_url')) and str(row['video_url']).strip()
     has_audio = pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip()
 
-    # Try video first if video_url exists
-    if has_video:
+    # If row has any media URL, try both video and audio paths
+    if has_video or has_audio:
+        # Try video first (upload script prefers video)
         candidates.append(f"{blob_prefix}/{idx}/video.mp4")
-
-    # Try audio as fallback (or first choice if no video_url)
-    if has_audio or has_video:
-        # Even if only video_url exists, try audio too (upload might have failed/partial)
+        # Then try audio as fallback
         candidates.append(f"{blob_prefix}/{idx}/audio.mp3")
 
     return candidates
