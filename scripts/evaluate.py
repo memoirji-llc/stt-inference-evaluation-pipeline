@@ -1,30 +1,246 @@
-import argparse, yaml, jiwer, wandb
+import argparse, yaml, jiwer, wandb, re
 from pathlib import Path
+import pandas as pd
+from bs4 import BeautifulSoup
+
 
 def normalize(s):
+    """Normalize text for WER calculation."""
     tx = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemovePunctuation(),
                         jiwer.Strip(), jiwer.RemoveMultipleSpaces()])
     return tx(s)
 
+
+def clean_raw_transcript_str(fulltext_file_str: str) -> str:
+    """
+    Clean raw XML transcript from VHP dataset.
+    Adapted from loc.ipynb notebook.
+    """
+    if not fulltext_file_str or pd.isna(fulltext_file_str):
+        return ""
+
+    l_transcript_lines = []
+    # utilize bs4 xml parser
+    soup = BeautifulSoup(fulltext_file_str, 'xml')
+    # each sp tag in the document represents a "line" in the transcript
+    for sp in soup.find_all('sp'):
+        try:
+            speaker = sp.find('speaker').get_text(strip=True)
+        except:
+            speaker = "speaker_unknown"
+        try:
+            spoken_text = sp.find('p').get_text(strip=True)
+        except:
+            spoken_text = ""
+
+        l_transcript_lines.append(f"<{speaker}>{spoken_text}</{speaker}> ")
+
+    # merge lines into one string
+    transcript_lines = ''.join(l_transcript_lines)
+
+    # remove (), [], {} and anything in between
+    transcript_lines_stripped = re.sub(r'\([^)]*\)', '', transcript_lines)
+    transcript_lines_stripped = re.sub(r'\[[^]]*\]', '', transcript_lines_stripped)
+    transcript_lines_stripped = re.sub(r'\{[^}]*\)\}', '', transcript_lines_stripped)
+
+    # remove double dashes and ellipsis
+    transcript_lines_stripped = re.sub(r'--+', '', transcript_lines_stripped)
+    transcript_lines_stripped = re.sub(r'\.{2,}', '', transcript_lines_stripped)
+
+    # clean whitespace
+    transcript_lines_stripped = re.sub(r'\s+', ' ', transcript_lines_stripped).strip()
+
+    # remove speaker tags
+    transcript_lines_stripped = re.sub(r'\<[^>]*\>', '', transcript_lines_stripped)
+
+    return transcript_lines_stripped
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--hyp", required=True)     # outputs/.../hyp_*.txt
-    ap.add_argument("--ref", required=True)     # your GT file (one line per file)
+    ap = argparse.ArgumentParser(description="Evaluate STT results against ground truth")
+    ap.add_argument("--config", required=True, help="Experiment config YAML")
+
+    # New workflow (parquet-based)
+    ap.add_argument("--inference_results", required=False, help="Path to inference_results.parquet (new workflow)")
+    ap.add_argument("--parquet", required=False, help="Path to VHP parquet with ground truth transcripts (new workflow)")
+
+    # Legacy workflow (single text file)
+    ap.add_argument("--hyp", required=False, help="Hypothesis text file (legacy workflow)")
+    ap.add_argument("--ref", required=False, help="Reference text file (legacy workflow)")
+
     args = ap.parse_args()
+
+    # Determine which workflow to use
+    if args.inference_results and args.parquet:
+        # New parquet-based workflow
+        evaluate_parquet_workflow(args)
+    elif args.hyp and args.ref:
+        # Legacy single-file workflow
+        evaluate_legacy_workflow(args)
+    else:
+        print("ERROR: Must provide either (--inference_results + --parquet) OR (--hyp + --ref)")
+        return 1
+
+
+def evaluate_legacy_workflow(args):
+    """Legacy workflow: single hypothesis file vs single reference file"""
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    # Read reference and hypothesis as single strings
+    ref_text = normalize(Path(args.ref).read_text())
+    hyp_text = normalize(Path(args.hyp).read_text())
+
+    # Compute WER
+    m = jiwer.process_words(ref_text, hyp_text)
+    print(f"\n=== EVALUATION RESULTS ===")
+    print(f"WER: {m.wer:.3f}")
+    print(f"Substitutions: {m.substitutions}")
+    print(f"Deletions: {m.deletions}")
+    print(f"Insertions: {m.insertions}")
+
+    # Log to wandb
+    wandb.init(project=cfg["wandb"]["project"], group=cfg["wandb"].get("group"),
+               job_type="evaluation", config=cfg, tags=cfg["wandb"].get("tags", []))
+    wandb.log({
+        "wer": m.wer,
+        "substitutions": m.substitutions,
+        "deletions": m.deletions,
+        "insertions": m.insertions,
+    })
+
+
+def evaluate_parquet_workflow(args):
+    """New workflow: parquet-based evaluation with per-file metrics"""
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    ref_text = normalize(Path(args.ref).read_text())
-    hyp_text = normalize(Path(args.hyp).read_text())
+    # Load inference results
+    df_results = pd.read_parquet(args.inference_results)
+    print(f"Loaded {len(df_results)} inference results")
 
-    m = jiwer.process_words(ref_text, hyp_text)
-    print("WER:", m.wer, "S:", m.substitutions, "D:", m.deletions, "I:", m.insertions)
+    # Load ground truth parquet
+    df_gt = pd.read_parquet(args.parquet)
+    print(f"Loaded {len(df_gt)} ground truth entries")
 
-    wandb.init(project=cfg["wandb"]["project"], group=cfg["wandb"].get("group"),
-               job_type="evaluation", config=cfg, tags=cfg["wandb"].get("tags", []))
-    wandb.log({"wer": m.wer, "subs": m.substitutions, "dels": m.deletions, "ins": m.insertions})
+    # Join inference results with ground truth
+    # Match by file_id (index in the original dataframe)
+    df_eval = df_results.copy()
+
+    # Extract ground truth for each file
+    eval_results = []
+    for idx, row in df_eval.iterrows():
+        file_id = row["file_id"]
+        hypothesis = row["hypothesis"]
+
+        # Get ground truth from parquet
+        if file_id < len(df_gt):
+            gt_row = df_gt.iloc[file_id]
+
+            # Check if we have cleaned transcript column
+            if 'transcript_raw_text_only' in df_gt.columns and pd.notnull(gt_row.get('transcript_raw_text_only')):
+                reference = gt_row['transcript_raw_text_only']
+            elif 'fulltext_file_str' in df_gt.columns and pd.notnull(gt_row.get('fulltext_file_str')):
+                # Clean the raw XML transcript
+                reference = clean_raw_transcript_str(gt_row['fulltext_file_str'])
+            else:
+                print(f"[{file_id}] No ground truth transcript available")
+                reference = None
+        else:
+            print(f"[{file_id}] file_id out of range for ground truth data")
+            reference = None
+
+        # Compute WER if we have both reference and hypothesis
+        if reference and hypothesis and row["status"] == "success":
+            ref_norm = normalize(reference)
+            hyp_norm = normalize(hypothesis)
+
+            try:
+                m = jiwer.process_words(ref_norm, hyp_norm)
+                wer = m.wer
+                subs = m.substitutions
+                dels = m.deletions
+                ins = m.insertions
+            except Exception as e:
+                print(f"[{file_id}] WER computation failed: {e}")
+                wer = None
+                subs = dels = ins = None
+        else:
+            wer = None
+            subs = dels = ins = None
+
+        eval_results.append({
+            "file_id": file_id,
+            "collection_number": row["collection_number"],
+            "wer": wer,
+            "substitutions": subs,
+            "deletions": dels,
+            "insertions": ins,
+            "duration_sec": row["duration_sec"],
+            "processing_time_sec": row["processing_time_sec"],
+            "status": row["status"],
+        })
+
+        if wer is not None:
+            print(f"[{file_id}] WER: {wer:.3f} | S: {subs}, D: {dels}, I: {ins}")
+
+    # Create evaluation DataFrame
+    df_eval_results = pd.DataFrame(eval_results)
+
+    # Save evaluation results
+    eval_path = Path(cfg["output"]["dir"]) / "evaluation_results.parquet"
+    df_eval_results.to_parquet(eval_path, index=False)
+    print(f"\nSaved evaluation results to {eval_path}")
+
+    # Also save as CSV for easy inspection
+    csv_path = Path(cfg["output"]["dir"]) / "evaluation_results.csv"
+    df_eval_results.to_csv(csv_path, index=False)
+    print(f"Saved evaluation results to {csv_path}")
+
+    # Compute aggregate metrics (only successful files with WER)
+    successful = df_eval_results[df_eval_results["wer"].notna()]
+
+    if len(successful) > 0:
+        mean_wer = successful["wer"].mean()
+        median_wer = successful["wer"].median()
+        total_duration = successful["duration_sec"].sum()
+        total_subs = successful["substitutions"].sum()
+        total_dels = successful["deletions"].sum()
+        total_ins = successful["insertions"].sum()
+
+        print(f"\n=== AGGREGATE METRICS ===")
+        print(f"Files evaluated: {len(successful)}")
+        print(f"Mean WER: {mean_wer:.3f}")
+        print(f"Median WER: {median_wer:.3f}")
+        print(f"Total duration: {total_duration:.1f}s")
+        print(f"Total errors - S: {total_subs}, D: {total_dels}, I: {total_ins}")
+
+        # Log to wandb
+        wandb.init(project=cfg["wandb"]["project"], group=cfg["wandb"].get("group"),
+                   job_type="evaluation", config=cfg, tags=cfg["wandb"].get("tags", []))
+
+        wandb.log({
+            "mean_wer": mean_wer,
+            "median_wer": median_wer,
+            "files_evaluated": len(successful),
+            "total_duration_sec": total_duration,
+            "total_substitutions": total_subs,
+            "total_deletions": total_dels,
+            "total_insertions": total_ins,
+        })
+
+        # Create wandb table for per-file results
+        table = wandb.Table(dataframe=df_eval_results)
+        wandb.log({"evaluation_results": table})
+
+        # Upload evaluation artifacts
+        wandb.save(str(eval_path))
+        wandb.save(str(csv_path))
+
+    else:
+        print("\nNo successful evaluations to report")
+
 
 if __name__ == "__main__":
     main()
