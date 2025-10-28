@@ -6,6 +6,8 @@ model:
   name: "whisper"  # Must match what run_inference.py expects
   dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
   batch_size: 8  # Use BatchedInferencePipeline for faster processing
+  device: "cpu"  # Force CPU for Mac/local testing
+  compute_type: "default"  # Auto-detect (int8 on CPU)
 
 input:
   source: "azure_blob"  # Load audio from Azure Blob Storage
