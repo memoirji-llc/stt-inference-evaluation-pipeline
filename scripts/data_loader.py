@@ -1,0 +1,132 @@
+"""
+Data loader for Veterans History Project dataset.
+Handles parquet reading, sampling, and mapping to Azure blob paths.
+"""
+import pandas as pd
+from pathlib import Path
+from typing import Optional, Dict, List
+
+
+def load_vhp_dataset(
+    parquet_path: str,
+    sample_size: Optional[int] = None,
+    filter_has_transcript: bool = True,
+    filter_has_media: bool = True
+) -> pd.DataFrame:
+    """
+    Load and optionally sample the VHP dataset from parquet.
+
+    Args:
+        parquet_path: Path to veterans_history_project_resources.parquet
+        sample_size: Number of items to sample (None = all)
+        filter_has_transcript: Only include rows with transcripts
+        filter_has_media: Only include rows with audio or video URLs
+
+    Returns:
+        DataFrame with sampled data
+    """
+    df = pd.read_parquet(parquet_path)
+
+    # Filter for items that have transcripts
+    if filter_has_transcript and 'fulltext_file_str' in df.columns:
+        df = df[df['fulltext_file_str'].notna()]
+        print(f"Filtered to {len(df)} items with transcripts")
+
+    # Filter for items that have media (audio or video)
+    if filter_has_media:
+        has_media = (df['audio_url'].notna()) | (df['video_url'].notna())
+        df = df[has_media]
+        print(f"Filtered to {len(df)} items with media")
+
+    # Sample if requested
+    if sample_size is not None and sample_size < len(df):
+        df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+        print(f"Sampled {sample_size} items")
+
+    return df
+
+
+def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") -> Optional[str]:
+    """
+    Construct Azure blob path for a given row.
+    Matches the naming convention from loc_vhp_2_az_blob.py:
+    {prefix}/{idx}/{media_type}.{ext}
+
+    Args:
+        row: DataFrame row with video_url/audio_url
+        idx: Row index (used in blob path)
+        blob_prefix: Blob storage prefix (default: "vhp")
+
+    Returns:
+        Blob path string, or None if no media available
+    """
+    # Prefer video, fallback to audio
+    if pd.notnull(row.get('video_url')) and str(row['video_url']).strip():
+        # Assuming .mp4 extension for videos
+        return f"{blob_prefix}/{idx}/video.mp4"
+    elif pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip():
+        # Assuming .mp3 extension for audio
+        return f"{blob_prefix}/{idx}/audio.mp3"
+    else:
+        return None
+
+
+def prepare_inference_manifest(
+    df: pd.DataFrame,
+    blob_prefix: str = "vhp"
+) -> List[Dict]:
+    """
+    Prepare a manifest for inference: list of items with paths and metadata.
+
+    Args:
+        df: DataFrame from load_vhp_dataset
+        blob_prefix: Azure blob prefix
+
+    Returns:
+        List of dicts with keys:
+        - file_id: unique identifier
+        - blob_path: path in Azure blob storage
+        - collection_number: VHP collection number
+        - ground_truth: transcript text (if available)
+        - title: item title
+    """
+    manifest = []
+
+    for idx, row in df.iterrows():
+        blob_path = get_blob_path_for_row(row, idx, blob_prefix)
+
+        if blob_path is None:
+            continue
+
+        # Extract ground truth transcript if available
+        # Note: fulltext_file_str is the raw XML, not cleaned
+        # If you have 'transcript_raw_text_only' column (from notebook), use that
+        gt_text = None
+        if 'transcript_raw_text_only' in df.columns and pd.notnull(row.get('transcript_raw_text_only')):
+            gt_text = row['transcript_raw_text_only']
+        elif 'fulltext_file_str' in df.columns and pd.notnull(row.get('fulltext_file_str')):
+            # Could clean it here, but for now just store raw
+            gt_text = row['fulltext_file_str']
+
+        manifest.append({
+            'file_id': idx,
+            'blob_path': blob_path,
+            'collection_number': row.get('collection_number', f'unknown_{idx}'),
+            'ground_truth': gt_text,
+            'title': row.get('title', ''),
+        })
+
+    return manifest
+
+
+def save_manifest_to_parquet(manifest: List[Dict], output_path: str):
+    """
+    Save inference manifest to parquet for later analysis.
+
+    Args:
+        manifest: List of dicts from prepare_inference_manifest
+        output_path: Path to save parquet file
+    """
+    df = pd.DataFrame(manifest)
+    df.to_parquet(output_path, index=False)
+    print(f"Saved manifest to {output_path}")
