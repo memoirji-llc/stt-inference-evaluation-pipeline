@@ -15,10 +15,10 @@ def main():
 
     # Import the appropriate inference module
     scripts_dir = Path(__file__).parent
-    if cfg["model"]["name"] == "whisper":
+    if "whisper" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_whisper as mod
-    elif cfg["model"]["name"] == "wav2vec2":
+    elif "wav2vec2" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_wav2vec2 as mod
     else:
