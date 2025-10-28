@@ -38,13 +38,11 @@ def load_vhp_dataset(
         df = df[has_media]
         print(f"Filtered to {len(df)} items with media")
 
+    # Sort by index for deterministic order
+    df = df.sort_index()
+
     # Sample if requested
     if sample_size is not None and sample_size < len(df):
-        # Before sampling: sort by index to ensure deterministic order across machines
-        # This ensures that even if DataFrame has different internal ordering,
-        # the sampling will be consistent
-        df = df.sort_index()
-
         # Store original indices before sampling (for debugging blob path issues)
         original_parquet_indices = df.index.tolist()
 
@@ -58,6 +56,13 @@ def load_vhp_dataset(
         print(f"Sampled {sample_size} items")
         print(f"  Original parquet row indices selected: {selected_original_indices[:5]}{'...' if len(selected_original_indices) > 5 else ''}")
         print(f"  Will look for blob paths: loc_vhp/0/ through loc_vhp/{sample_size-1}/")
+    else:
+        # No sampling - use all rows
+        # CRITICAL: Reset index to 0,1,2... to match upload script sequential indices
+        # The upload script processed ALL rows sequentially (0-4600), so we need to match that
+        df = df.reset_index(drop=True)
+        print(f"Using all {len(df)} items (no sampling)")
+        print(f"  Will look for blob paths: loc_vhp/0/ through loc_vhp/{len(df)-1}/")
 
     return df
 
