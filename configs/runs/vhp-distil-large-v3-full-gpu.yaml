@@ -3,7 +3,7 @@
 # This is the most comprehensive distilled model benchmark
 # WARNING: This will take MANY hours to complete (estimate: 24-48 hours)!
 
-experiment_id: vhp-distil-large-v3-all-full-gpu
+experiment_id: vhp-distil-large-v3-full-gpu
 model:
   name: "distil-whisper-large-v3"
   dir: "./models/faster-whisper/models--Systran--faster-distil-whisper-large-v3"
@@ -20,7 +20,7 @@ input:
   sample_rate: 16000
 
 output:
-  dir: "outputs/vhp-distil-large-v3-all-full-gpu"
+  dir: "outputs/vhp-distil-large-v3-full-gpu"
   save_per_file: true
 
 wandb:

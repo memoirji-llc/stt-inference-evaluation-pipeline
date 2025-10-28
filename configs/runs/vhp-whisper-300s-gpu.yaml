@@ -1,0 +1,28 @@
+# Experiment: Whisper base, ALL files (~4600), 5 minutes each (GPU)
+# Complete dataset benchmark - NO SAMPLING
+# WARNING: This will take many hours to complete!
+
+experiment_id: vhp-whisper-300s-gpu
+model:
+  name: "whisper-base"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
+  batch_size: 16
+  device: "cuda"
+  compute_type: "float16"
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: null  # Process ALL files (no sampling)
+  duration_sec: 300  # 5 minutes
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-whisper-300s-gpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-gpu-full-dataset
+  tags: ["whisper-base", "all-files", "duration-300s", "gpu", "t4", "complete-benchmark"]
