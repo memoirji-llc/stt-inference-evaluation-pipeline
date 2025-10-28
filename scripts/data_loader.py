@@ -40,8 +40,24 @@ def load_vhp_dataset(
 
     # Sample if requested
     if sample_size is not None and sample_size < len(df):
-        df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+        # Before sampling: sort by index to ensure deterministic order across machines
+        # This ensures that even if DataFrame has different internal ordering,
+        # the sampling will be consistent
+        df = df.sort_index()
+
+        # Store original indices before sampling (for debugging blob path issues)
+        original_parquet_indices = df.index.tolist()
+
+        # Now sample - this should be deterministic across machines
+        df_sampled = df.sample(n=sample_size, random_state=42)
+        selected_original_indices = sorted(df_sampled.index.tolist())
+
+        # Reset index to 0,1,2... for blob path generation
+        df = df_sampled.reset_index(drop=True)
+
         print(f"Sampled {sample_size} items")
+        print(f"  Original parquet row indices selected: {selected_original_indices[:5]}{'...' if len(selected_original_indices) > 5 else ''}")
+        print(f"  Will look for blob paths: loc_vhp/0/ through loc_vhp/{sample_size-1}/")
 
     return df
 
