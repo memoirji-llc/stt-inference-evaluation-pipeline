@@ -1,0 +1,28 @@
+# Experiment: Distil-Whisper large-v3, 100 files, full duration (GPU)
+# Large-scale benchmark with complete audio
+# Distilled model should be significantly faster than regular large-v3
+
+experiment_id: vhp-distil-large-v3-sample1000-full-gpu
+model:
+  name: "distil-whisper-large-v3"
+  dir: "./models/faster-whisper/models--Systran--faster-distil-whisper-large-v3"
+  batch_size: 12
+  device: "cuda"
+  compute_type: "float16"
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 1000
+  duration_sec: null  # Full audio
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-distil-large-v3-sample1000-full-gpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-gpu-distil-large-v3
+  tags: ["distil-whisper-large-v3", "sample100", "full-duration", "gpu", "t4", "distilled"]
