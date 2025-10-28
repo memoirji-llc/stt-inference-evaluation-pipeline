@@ -9,7 +9,7 @@ model:
 
 input:
   source: "azure_blob"  # Load audio from Azure Blob Storage
-  parquet_path: "data/veterans_history_project_resources.parquet"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
   blob_prefix: "loc_vhp"  # Prefix in Azure blob storage
   sample_size: 10  # Process only 10 files for testing (set to null for all)
   duration_sec: 300  # Process first 5 minutes (set to null for full file)
