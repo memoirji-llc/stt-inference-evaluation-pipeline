@@ -1,0 +1,22 @@
+experiment_id: vhp-whisper-base-01
+model:
+  name: "whisper"  # Must match what run_inference.py expects
+  dir: "./models/models--Systran--faster-whisper-base"
+  batch_size: 8  # Use BatchedInferencePipeline for faster processing
+input:
+  source: "local"  # "local" or "azure_blob"
+  # For azure_blob source:
+  # parquet_path: "data/veterans_history_project_resources.parquet"
+  # blob_prefix: "loc_vhp"
+  # sample_size: 10  # Number of files to process (null = all with transcripts)
+  # For local source:
+  audio_glob: "/Users/ac/main/amia2025-stt-benchmarking/data/audio/testing/*.mp3"
+  duration_sec: 300  # Max duration to process (null = full file)
+  sample_rate: 16000
+output:
+  dir: "outputs/vhp-whisper-base-01"
+  save_per_file: false  # Save individual hypothesis files
+wandb:
+  project: amia-stt
+  group: inference-vhp
+  tags: ["whisper-base", "batch-processing"]

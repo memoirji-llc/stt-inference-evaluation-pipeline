@@ -1,0 +1,25 @@
+# Example config for running inference on VHP dataset from Azure Blob Storage
+# This demonstrates the "scaled" workflow with parquet + Azure blob
+
+experiment_id: vhp-whisper-azure-sample
+model:
+  name: "whisper"  # Must match what run_inference.py expects
+  dir: "./models/models--Systran--faster-whisper-base"
+  batch_size: 8  # Use BatchedInferencePipeline for faster processing
+
+input:
+  source: "azure_blob"  # Load audio from Azure Blob Storage
+  parquet_path: "data/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"  # Prefix in Azure blob storage
+  sample_size: 10  # Process only 10 files for testing (set to null for all)
+  duration_sec: 300  # Process first 5 minutes (set to null for full file)
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-whisper-azure-sample"
+  save_per_file: true  # Save individual hypothesis files
+
+wandb:
+  project: amia-stt
+  group: azure-blob-test
+  tags: ["whisper-base", "azure-blob", "sample-test"]
