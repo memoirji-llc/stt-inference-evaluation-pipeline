@@ -3,15 +3,15 @@
 
 experiment_id: vhp-whisper-azure-gpu
 model:
-  name: "whisper"
-  dir: "./models/models--Systran--faster-whisper-base"
+  name: "whisper-base"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
   batch_size: 16  # T4 has 16GB VRAM, can handle larger batches
   device: "cuda"  # Explicitly use GPU
   compute_type: "float16"  # Use FP16 for faster inference on GPU
 
 input:
   source: "azure_blob"
-  parquet_path: "data/veterans_history_project_resources.parquet"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
   blob_prefix: "loc_vhp"
   sample_size: 10  # Start small, scale up once working
   duration_sec: 300  # Process first 5 minutes

@@ -3,7 +3,7 @@
 
 experiment_id: vhp-whisper-azure-sample
 model:
-  name: "whisper"  # Must match what run_inference.py expects
+  name: "whisper-base"  # Must match what run_inference.py expects
   dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
   batch_size: 8  # Use BatchedInferencePipeline for faster processing
   device: "cpu"  # Force CPU for Mac/local testing
