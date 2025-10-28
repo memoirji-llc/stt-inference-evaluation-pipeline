@@ -1,55 +1,285 @@
 # config/ io
+import os
+import sys
 import glob
+import time
 from pathlib import Path
 import yaml
 from tempfile import NamedTemporaryFile
+from typing import Optional, Dict, List
 # audio processing
 import soundfile as sf
 import librosa
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from pydub import AudioSegment
 # models
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 # experiment tracking
 import wandb
 
-# # load config
-# with open("configs/inference.yaml") as f:
-#     cfg = yaml.safe_load(f)
+# Import local modules (same directory)
+# Add scripts directory to path for imports
+_scripts_dir = Path(__file__).parent
+sys.path.insert(0, str(_scripts_dir))
+import azure_utils
+import data_loader
+
 
 def run(cfg):
-    out_dir = Path(cfg["output"]["dir"]); out_dir.mkdir(parents=True, exist_ok=True)
+    """
+    Run Whisper inference on dataset from config.
+
+    Supports:
+    - Local files via glob pattern
+    - Azure blob storage via parquet manifest
+    - Batch processing (faster-whisper BatchedInferencePipeline)
+    - Flexible duration (full file or sliced)
+    - Per-file outputs and metrics
+    """
+    out_dir = Path(cfg["output"]["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load model
     model_root = Path(cfg["model"]["dir"])
     model_snap = max((model_root / "snapshots").iterdir(), key=lambda p: p.stat().st_mtime)
-    model_file_dir = str(model_snap)  # folder that contains model.bin
-    model = WhisperModel(model_file_dir, device="auto")
-    print("Using model dir on local:", model_file_dir)
-    hyp_path = out_dir / "hyp_whisper.txt"
-    
-    with open(hyp_path, "w") as hout:
-        
-        for p in glob.glob(cfg["input"]["audio_glob"]):
-            # load exactly first 120s as mono 16k
-            wave, _ = librosa.load(p, sr=16000, mono=True, duration=120)
-            
-            with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-                
-                sf.write(tmp.name, wave, 16000)  # write trimmed clip
-                
-                segments, info = model.transcribe(
-                    tmp.name,
-                    beam_size=1,
-                    temperature=0.0,
-                    vad_filter=True,
-                    no_speech_threshold=0.6,
-                    word_timestamps=False,
-                    initial_prompt=None,
-                    suppress_tokens=[-1],   # <-- FIX: list of ints, or set to None
-                    condition_on_previous_text=False,
-                )
+    model_file_dir = str(model_snap)
+    print(f"Loading model from: {model_file_dir}")
 
-                hyp_whisper = " ".join(s.text.strip().lower() for s in segments)
-                print(f"[{info.language}] {hyp_whisper[:10]}...")
-                wandb.log({"placeholder": 1})
+    # Use batched pipeline if batch_size specified
+    batch_size = cfg["model"].get("batch_size", 1)
+    base_model = WhisperModel(model_file_dir, device="auto")
+
+    if batch_size > 1:
+        model = BatchedInferencePipeline(model=base_model)
+        print(f"Using BatchedInferencePipeline with batch_size={batch_size}")
+    else:
+        model = base_model
+        print("Using standard WhisperModel (no batching)")
+
+    # Determine input source
+    source_type = cfg["input"].get("source", "local")
+    duration_sec = cfg["input"].get("duration_sec")  # None = full duration
+    sample_rate = cfg["input"].get("sample_rate", 16000)
+
+    # Prepare file manifest
+    if source_type == "azure_blob":
+        # Load from parquet + Azure blob
+        parquet_path = cfg["input"]["parquet_path"]
+        sample_size = cfg["input"].get("sample_size")
+        blob_prefix = cfg["input"].get("blob_prefix", "vhp")
+
+        df = data_loader.load_vhp_dataset(parquet_path, sample_size=sample_size)
+        manifest = data_loader.prepare_inference_manifest(df, blob_prefix=blob_prefix)
+        print(f"Prepared manifest with {len(manifest)} items from Azure blob")
+    else:
+        # Local files via glob
+        audio_glob = cfg["input"]["audio_glob"]
+        file_paths = glob.glob(audio_glob)
+        manifest = [
+            {"file_id": i, "blob_path": p, "collection_number": Path(p).stem, "ground_truth": None, "title": ""}
+            for i, p in enumerate(file_paths)
+        ]
+        print(f"Found {len(manifest)} local files")
+
+    # Run inference on all files
+    results = []
+    hyp_path = out_dir / "hyp_whisper.txt"
+
+    with open(hyp_path, "w") as hout:
+        for item in tqdm(manifest, desc="Transcribing"):
+            file_id = item["file_id"]
+            source_path = item["blob_path"]
+            collection_num = item["collection_number"]
+
+            # Log attempt
+            print(f"\n[{file_id}] Processing: {collection_num}")
+            print(f"  Blob path: {source_path}")
+
+            try:
+                # Load audio
+                start_time = time.time()
+
+                # Download and check file size if Azure blob
+                if source_type == "azure_blob":
+                    audio_bytes = azure_utils.download_blob_to_memory(source_path)
+                    file_size_mb = len(audio_bytes) / (1024 * 1024)
+                    print(f"  Downloaded: {file_size_mb:.2f} MB")
+
+                    # Check if file looks valid
+                    if len(audio_bytes) < 100:
+                        raise ValueError(f"File too small ({len(audio_bytes)} bytes) - likely empty or corrupted")
+
+                    # Use pydub to handle both MP3 and MP4 (video) files
+                    import io
+                    print(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
+
+                    # Load with pydub (handles MP3, MP4, M4A, WAV, etc.)
+                    audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+
+                    # Normalize: convert to mono, resample to target rate
+                    audio_segment = audio_segment.set_channels(1)  # Mono
+                    audio_segment = audio_segment.set_frame_rate(sample_rate)  # 16kHz
+
+                    # Trim to desired duration if specified
+                    if duration_sec is not None:
+                        duration_ms = duration_sec * 1000
+                        audio_segment = audio_segment[:duration_ms]
+
+                    # Convert to numpy array for Whisper
+                    samples = np.array(audio_segment.get_array_of_samples())
+                    # Normalize to float32 [-1, 1]
+                    if audio_segment.sample_width == 2:  # 16-bit
+                        wave = samples.astype(np.float32) / 32768.0
+                    elif audio_segment.sample_width == 4:  # 32-bit
+                        wave = samples.astype(np.float32) / 2147483648.0
+                    else:
+                        wave = samples.astype(np.float32)
+
+                    actual_duration = len(wave) / sample_rate
+                else:
+                    # Load from local file (also use pydub for consistency)
+                    print(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
+                    audio_segment = AudioSegment.from_file(source_path)
+                    audio_segment = audio_segment.set_channels(1)
+                    audio_segment = audio_segment.set_frame_rate(sample_rate)
+
+                    if duration_sec is not None:
+                        duration_ms = duration_sec * 1000
+                        audio_segment = audio_segment[:duration_ms]
+
+                    samples = np.array(audio_segment.get_array_of_samples())
+                    if audio_segment.sample_width == 2:
+                        wave = samples.astype(np.float32) / 32768.0
+                    elif audio_segment.sample_width == 4:
+                        wave = samples.astype(np.float32) / 2147483648.0
+                    else:
+                        wave = samples.astype(np.float32)
+
+                    actual_duration = len(wave) / sample_rate
+
+                load_time = time.time() - start_time
+                print(f"  Audio loaded: {actual_duration:.1f}s in {load_time:.1f}s")
+
+                # Transcribe
+                with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+                    sf.write(tmp.name, wave, sample_rate)
+
+                    transcribe_args = {
+                        "beam_size": 1,
+                        "temperature": 0.0,
+                        "vad_filter": True,
+                        "no_speech_threshold": 0.6,
+                        "word_timestamps": False,
+                        "initial_prompt": None,
+                        "suppress_tokens": [-1],
+                        "condition_on_previous_text": False,
+                    }
+
+                    if batch_size > 1:
+                        transcribe_args["batch_size"] = batch_size
+
+                    segments, info = model.transcribe(tmp.name, **transcribe_args)
+
+                    # Join segments
+                    hyp_text = " ".join(s.text.strip() for s in segments)
+                    total_time = time.time() - start_time
+                    transcribe_time = total_time - load_time
+                    speed_factor = actual_duration / total_time if total_time > 0 else 0
+
+                    # Write to output file (one line per file)
+                    hout.write(hyp_text + "\n")
+
+                    # Save per-file result
+                    if cfg["output"].get("save_per_file", False):
+                        per_file_path = out_dir / f"hyp_{file_id}.txt"
+                        with open(per_file_path, "w") as f:
+                            f.write(hyp_text)
+
+                    # Log to wandb
+                    wandb.log({
+                        "file_id": file_id,
+                        "collection_number": collection_num,
+                        "duration_sec": actual_duration,
+                        "processing_time_sec": total_time,
+                        "detected_language": info.language,
+                        "hypothesis_length": len(hyp_text),
+                    })
+
+                    results.append({
+                        "file_id": file_id,
+                        "collection_number": collection_num,
+                        "blob_path": source_path,
+                        "hypothesis": hyp_text,
+                        "duration_sec": actual_duration,
+                        "processing_time_sec": total_time,
+                        "language": info.language,
+                        "status": "success",
+                    })
+
+                    # Improved logging
+                    print(f"  Transcription complete!")
+                    print(f"    - Audio duration: {actual_duration:.1f}s")
+                    print(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
+                    print(f"    - Speed: {speed_factor:.1f}x realtime")
+                    print(f"    - Language: {info.language}")
+                    print(f"    - Preview: {hyp_text[:80]}...")
+                    print(f"  ✓ SUCCESS")
+
+            except Exception as e:
+                import traceback
+                error_type = type(e).__name__
+                error_msg = str(e)
+
+                print(f"  ✗ FAILED: {error_type}")
+                print(f"    Error: {error_msg}")
+
+                # Additional context for common errors
+                if "Format not recognised" in error_msg or "NoBackendError" in error_type:
+                    print(f"    → This file may be corrupted, empty, or in an unsupported format")
+                    print(f"    → Check the blob in Azure storage: {source_path}")
+                elif "BlobNotFound" in error_type or "ResourceNotFoundError" in error_type:
+                    print(f"    → Blob does not exist in Azure storage")
+                    print(f"    → Expected path: {source_path}")
+                elif len(error_msg) < 200:
+                    # Short error, show full traceback for debugging
+                    print(f"    Traceback: {traceback.format_exc()}")
+
+                wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
+                results.append({
+                    "file_id": file_id,
+                    "collection_number": collection_num,
+                    "blob_path": source_path,
+                    "hypothesis": "",
+                    "duration_sec": 0,
+                    "processing_time_sec": 0,
+                    "language": "",
+                    "status": f"failed: {error_type}",
+                    "error_message": error_msg,
+                })
+                hout.write("\n")  # Empty line for failed files
+
+    # Save results DataFrame
+    df_results = pd.DataFrame(results)
+    results_path = out_dir / "inference_results.parquet"
+    df_results.to_parquet(results_path, index=False)
+    print(f"\nSaved inference results to {results_path}")
+
+    # Log aggregate metrics
+    successful = df_results[df_results["status"] == "success"]
+    wandb.log({
+        "total_files": len(results),
+        "successful_files": len(successful),
+        "failed_files": len(results) - len(successful),
+        "total_duration_sec": successful["duration_sec"].sum(),
+        "total_processing_time_sec": successful["processing_time_sec"].sum(),
+        "avg_processing_time_sec": successful["processing_time_sec"].mean(),
+    })
+
+    # Upload artifacts to wandb
     wandb.save(str(hyp_path))
-    wandb.save(str(info))
-    print("testing finished")
-    return {"hyp_path": str(hyp_path)}
+    wandb.save(str(results_path))
+
+    print("Inference complete!")
+    return {"hyp_path": str(hyp_path), "results_path": str(results_path)}
