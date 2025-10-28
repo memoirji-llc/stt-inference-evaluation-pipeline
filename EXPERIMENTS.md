@@ -42,6 +42,22 @@ This document lists all available experiment configurations and how to run them.
 - `vhp-distil-large-v3-sample100-600s-gpu.yaml` - 100 files, 10min
 - `vhp-distil-large-v3-sample100-full-gpu.yaml` - 100 files, full audio
 
+### Complete Dataset (NO SAMPLING - ~4600 files)
+
+**⚠️ WARNING: These will take MANY hours to complete**
+
+**GPU (Azure VM):**
+- `vhp-whisper-300s-gpu.yaml` - ALL files, 5min each, whisper-base
+- `vhp-large-v3-300s-gpu.yaml` - ALL files, 5min each, large-v3
+- `vhp-distil-large-v3-full-gpu.yaml` - ALL files, FULL audio, distil-large-v3 ⭐ ULTIMATE BENCHMARK
+
+To create your own "all files" config, simply set:
+```yaml
+input:
+  sample_size: null  # Process ALL files (no sampling)
+  duration_sec: null  # Optional: full audio (no time limit)
+```
+
 ---
 
 ## How to Run Experiments
@@ -172,3 +188,13 @@ Approximate runtimes on Azure VM with T4 GPU:
 | distil-large-v3 | 100 | full | 3-6 hours |
 
 *Actual times vary based on audio file lengths and quality.*
+
+
+uv run python scripts/run_pipeline.py \
+  --configs configs/runs/vhp-distil-large-v3-sample10-300s-gpu.yaml \
+            configs/runs/vhp-distil-large-v3-sample50-600s-gpu.yaml \
+            configs/runs/vhp-distil-large-v3-sample50-full-gpu.yaml \
+            configs/runs/vhp-distil-large-v3-sample100-300s-gpu.yaml \
+            configs/runs/vhp-distil-large-v3-sample100-600s-gpu.yaml \
+            configs/runs/vhp-distil-large-v3-sample100-full-gpu.yaml \
+  --parquet data/raw/loc/veterans_history_project_resources.parquet
