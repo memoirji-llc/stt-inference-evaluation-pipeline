@@ -38,6 +38,9 @@ def run(cfg):
     - Flexible duration (full file or sliced)
     - Per-file outputs and metrics
     """
+    # Track total experiment wall-clock time
+    experiment_start_time = time.time()
+
     out_dir = Path(cfg["output"]["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -298,16 +301,37 @@ def run(cfg):
     df_results.to_parquet(results_path, index=False)
     print(f"\nSaved inference results to {results_path}")
 
+    # Calculate total experiment time
+    experiment_end_time = time.time()
+    total_experiment_time = experiment_end_time - experiment_start_time
+
     # Log aggregate metrics
     successful = df_results[df_results["status"] == "success"]
+    total_audio_duration = successful["duration_sec"].sum()
+    total_processing_time = successful["processing_time_sec"].sum()
+
     wandb.log({
         "total_files": len(results),
         "successful_files": len(successful),
         "failed_files": len(results) - len(successful),
-        "total_duration_sec": successful["duration_sec"].sum(),
-        "total_processing_time_sec": successful["processing_time_sec"].sum(),
+        "total_audio_duration_sec": total_audio_duration,
+        "total_processing_time_sec": total_processing_time,
+        "total_experiment_time_sec": total_experiment_time,  # Wall-clock time (includes overhead)
         "avg_processing_time_sec": successful["processing_time_sec"].mean(),
+        "speedup_factor": total_audio_duration / total_experiment_time if total_experiment_time > 0 else 0,  # How many x realtime
     })
+
+    # Print summary
+    print(f"\n{'='*60}")
+    print(f"EXPERIMENT SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total files: {len(results)}")
+    print(f"Successful: {len(successful)}")
+    print(f"Failed: {len(results) - len(successful)}")
+    print(f"Total audio duration: {total_audio_duration/60:.1f} minutes ({total_audio_duration/3600:.2f} hours)")
+    print(f"Total experiment time: {total_experiment_time/60:.1f} minutes ({total_experiment_time/3600:.2f} hours)")
+    print(f"Speedup: {total_audio_duration/total_experiment_time:.2f}x realtime")
+    print(f"{'='*60}")
 
     # Upload artifacts to wandb
     wandb.save(str(hyp_path))
