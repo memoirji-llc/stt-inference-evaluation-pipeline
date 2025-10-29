@@ -19,6 +19,7 @@ data/veterans_history_project_sample_processed
 
 #wandb
 wandb/
+wandb/latest-run
 
 #outputs
 outputs/
