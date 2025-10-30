@@ -1,0 +1,26 @@
+# Experiment: Wav2Vec2 base-960h, 10 files, 5 minutes (CPU)
+# Quick test on local Mac for Wav2Vec2
+
+experiment_id: vhp-wav2vec2-sample10-300s-cpu
+model:
+  name: "wav2vec2"  # Important! This triggers infer_wav2vec2.py
+  dir: "./models/wav2vec2/facebook--wav2vec2-base-960h"
+  batch_size: 1  # Wav2Vec2 processes one file at a time
+  device: "cpu"  # Force CPU for Mac
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10
+  duration_sec: 300  # 5 minutes
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-wav2vec2-sample10-300s-cpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-cpu-wav2vec2
+  tags: ["wav2vec2-base-960h", "sample10", "duration-300s", "cpu"]
