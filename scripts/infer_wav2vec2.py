@@ -216,10 +216,8 @@ def run(cfg):
 
                 # Save individual file if requested
                 if cfg["output"].get("save_per_file", False):
-                    file_out_dir = out_dir / "per_file"
-                    file_out_dir.mkdir(exist_ok=True)
-                    file_hyp_path = file_out_dir / f"{file_id:04d}_{collection_num}.txt"
-                    with open(file_hyp_path, "w") as f:
+                    per_file_path = out_dir / f"hyp_{file_id}.txt"
+                    with open(per_file_path, "w") as f:
                         f.write(hyp_text)
 
                 # Log to wandb
