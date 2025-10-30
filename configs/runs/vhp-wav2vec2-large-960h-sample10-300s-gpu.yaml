@@ -1,10 +1,10 @@
 # Experiment: Wav2Vec2 large, 10 files, 5 minutes (GPU)
 # Quick test with Wav2Vec2 model for comparison with Whisper
 
-experiment_id: vhp-wav2vec2-large-sample10-300s-gpu
+experiment_id: vhp-wav2vec2-large-960h-sample10-300s-gpu
 model:
   name: "wav2vec2"  # Important! This triggers infer_wav2vec2.py
-  dir: "./models/wav2vec2/facebook--wav2vec2-large"
+  dir: "./models/wav2vec2/facebook--wav2vec2-large-960h"
   batch_size: 1  # Wav2Vec2 processes one file at a time (no batching like Whisper)
   device: "cuda"
 
@@ -17,10 +17,10 @@ input:
   sample_rate: 16000
 
 output:
-  dir: "outputs/vhp-wav2vec2-large-sample10-300s-gpu"
+  dir: "outputs/vhp-wav2vec2-large-960h-sample10-300s-gpu"
   save_per_file: true
 
 wandb:
   project: amia-stt
   group: experiments-gpu-wav2vec2
-  tags: ["wav2vec2-large", "sample10", "duration-300s", "gpu", "t4"]
+  tags: ["wav2vec2-large-960h", "sample10", "duration-300s", "gpu", "t4"]
