@@ -25,6 +25,7 @@ dependencies = [
   "lxml>=6.0.2",
   "faster-whisper>=1.2.0",
   "azure-identity>=1.25.1",
+  "matplotlib>=3.10.7",
 ]
 
 [dependency-groups]
