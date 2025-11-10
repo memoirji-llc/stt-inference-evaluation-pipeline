@@ -1,0 +1,28 @@
+# Experiment: Whisper base, ALL files (~4600), Entire duration (GPU)
+# Complete dataset benchmark - NO SAMPLING
+# WARNING: This will take many hours to complete!
+
+experiment_id: vhp-pre2010-distil-large-v3-full-gpu
+model:
+  name: "distil-whisper-large-v3"
+  dir: "./models/faster-whisper/models--Systran--faster-distil-whisper-large-v3"
+  batch_size: 12  # Distilled models can handle larger batches
+  device: "cuda"
+  compute_type: "float16"
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: null  # Process ALL files (no sampling)
+  duration_sec: null  # Full audio
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-pre2010-distil-large-v3-full-gpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-gpu-full-dataset
+  tags: ["distil-whisper-large-v3", "record-pre2010", "all-files", "full-duration", "gpu", "t4", "distilled"]
