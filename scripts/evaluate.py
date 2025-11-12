@@ -4,10 +4,46 @@ import pandas as pd
 from bs4 import BeautifulSoup
 
 
-def normalize(s):
-    """Normalize text for WER calculation."""
-    tx = jiwer.Compose([jiwer.ToLowerCase(), jiwer.RemovePunctuation(),
-                        jiwer.Strip(), jiwer.RemoveMultipleSpaces()])
+def normalize(s, use_whisper_normalizer=False):
+    """
+    Normalize text for WER calculation.
+
+    Args:
+        s: Input text string
+        use_whisper_normalizer: If True, use OpenAI's Whisper normalizer (handles numbers, dates, etc.)
+                                If False, use jiwer's standard normalization with contraction expansion
+
+    Returns:
+        Normalized text string
+
+    Note:
+        Standard normalization (default):
+        - Expands contractions (we're → we are, can't → can not)
+        - Converts to lowercase
+        - Removes punctuation
+        - Normalizes whitespace
+
+        This follows best practices from Whisper normalizer and ASR research.
+        See: learnings/wer-normalization-guide.md for details.
+    """
+    if use_whisper_normalizer:
+        try:
+            from whisper.normalizers import EnglishTextNormalizer
+            normalizer = EnglishTextNormalizer()
+            return normalizer(s)
+        except ImportError:
+            print("WARNING: whisper not installed. Falling back to jiwer normalization.")
+            print("Install with: pip install openai-whisper")
+            use_whisper_normalizer = False
+
+    # Standard jiwer normalization (default)
+    tx = jiwer.Compose([
+        jiwer.ExpandCommonEnglishContractions(),  # Expand we're → we are, etc.
+        jiwer.ToLowerCase(),
+        jiwer.RemovePunctuation(),
+        jiwer.RemoveMultipleSpaces(),
+        jiwer.Strip()
+    ])
     return tx(s)
 
 
@@ -87,9 +123,12 @@ def evaluate_legacy_workflow(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    # Get normalization setting from config (default: False = use jiwer)
+    use_whisper_normalizer = cfg.get("evaluation", {}).get("use_whisper_normalizer", False)
+
     # Read reference and hypothesis as single strings
-    ref_text = normalize(Path(args.ref).read_text())
-    hyp_text = normalize(Path(args.hyp).read_text())
+    ref_text = normalize(Path(args.ref).read_text(), use_whisper_normalizer=use_whisper_normalizer)
+    hyp_text = normalize(Path(args.hyp).read_text(), use_whisper_normalizer=use_whisper_normalizer)
 
     # Compute WER
     m = jiwer.process_words(ref_text, hyp_text)
@@ -115,6 +154,15 @@ def evaluate_parquet_workflow(args):
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    # Get normalization setting from config (default: False = use jiwer)
+    use_whisper_normalizer = cfg.get("evaluation", {}).get("use_whisper_normalizer", False)
+
+    # Print normalization method being used
+    if use_whisper_normalizer:
+        print("Using Whisper normalizer (numbers, dates, contractions, etc.)")
+    else:
+        print("Using jiwer normalization with contraction expansion (default)")
 
     # Load inference results
     df_results = pd.read_parquet(args.inference_results)
@@ -153,8 +201,8 @@ def evaluate_parquet_workflow(args):
 
         # Compute WER if we have both reference and hypothesis
         if reference and hypothesis and row["status"] == "success":
-            ref_norm = normalize(reference)
-            hyp_norm = normalize(hypothesis)
+            ref_norm = normalize(reference, use_whisper_normalizer=use_whisper_normalizer)
+            hyp_norm = normalize(hypothesis, use_whisper_normalizer=use_whisper_normalizer)
 
             try:
                 m = jiwer.process_words(ref_norm, hyp_norm)
