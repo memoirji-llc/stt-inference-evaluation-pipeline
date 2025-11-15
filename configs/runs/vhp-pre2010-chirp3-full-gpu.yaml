@@ -13,10 +13,10 @@ model:
     credentials_path: "credentials/gcloud/application_default_credentials.json"
     temp_bucket: "memoirji-amia-2025-temp"
 
-    # Parallelization settings (conservative for testing)
-    upload_workers: 10
-    transcribe_workers: 5
-    batch_size: 5  # Process all 5 files in one batch
+    # Parallelization settings
+    upload_workers: 100
+    transcribe_workers: 30
+    batch_size: 200
 
     # API settings
     language_code: "en-US"
