@@ -10,6 +10,9 @@ infra/azure/env.local.sh
 #models directory
 models/
 
+#credentials
+credentials/
+
 #data directory
 data/*.*
 data/audio
