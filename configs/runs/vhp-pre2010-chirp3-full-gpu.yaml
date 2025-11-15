@@ -1,0 +1,41 @@
+# Test experiment: GCP Chirp 3 with 5 files (local testing)
+# Quick test to validate GCP integration before running larger experiments
+
+experiment_id: vhp-pre2010-chirp3-full-gpu
+
+model:
+  name: "gcp_chirp"
+  model_variant: "chirp_3"  # Options: "chirp" (Chirp 2), "chirp_2" (Chirp 2), "chirp_3" (Chirp 3)
+
+  # GCP-specific settings
+  gcp:
+    project_id: "memoirji-amia-2025"
+    credentials_path: "credentials/gcloud/application_default_credentials.json"
+    temp_bucket: "memoirji-amia-2025-temp"
+
+    # Parallelization settings (conservative for testing)
+    upload_workers: 10
+    transcribe_workers: 5
+    batch_size: 5  # Process all 5 files in one batch
+
+    # API settings
+    language_code: "en-US"
+    upload_timeout: 600  # Upload timeout in seconds (10 minutes for large files)
+    transcribe_timeout: 600  # Transcription timeout in seconds per file
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: null  # Process ALL files (no sampling)
+  duration_sec: null  # Full audio
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-pre2010-chirp3-full-gpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-gpu-full-dataset
+  tags: ["gcp", "chirp3", "commercial-api", "record-pre2010", "full-duration", "gpu", "t4"]
