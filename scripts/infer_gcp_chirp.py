@@ -395,9 +395,11 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
     print(f"  ✓ Created {len(file_metadata_list)} file metadata objects")
 
     # ===========================================================================
-    # PHASE 3: Send ONE BatchRecognizeRequest for ALL files
+    # PHASE 3: Start transcriptions (send individual requests in parallel)
     # ===========================================================================
-    print(f"\n[Batch API] Sending BatchRecognizeRequest for {len(file_metadata_list)} files...")
+    # NOTE: GCP's inline_response_config only works with 1 file per request
+    # So we send individual requests but in parallel (non-blocking)
+    print(f"\n[Batch API] Starting {len(file_metadata_list)} transcription operations...")
 
     config = cloud_speech.RecognitionConfig(
         auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
@@ -407,62 +409,74 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
 
     recognizer = f"projects/{project_id}/locations/{recognizer_location}/recognizers/_"
 
-    request = cloud_speech.BatchRecognizeRequest(
-        recognizer=recognizer,
-        config=config,
-        files=file_metadata_list,  # ALL FILES IN ONE REQUEST!
-        recognition_output_config=cloud_speech.RecognitionOutputConfig(
-            inline_response_config=cloud_speech.InlineOutputConfig(),
-        ),
-    )
+    operations = []  # Store (operation, gcs_uri, file_info) tuples
 
-    try:
-        operation = speech_client.batch_recognize(request=request)
-        print(f"  ✓ Batch operation started: {operation.operation.name}")
-    except Exception as e:
-        print(f"  ✗ Failed to start batch operation: {e}")
-        # Cleanup and return errors
-        _cleanup_gcs_files(bucket, [uf['gcs_filename'] for uf in uploaded_files], upload_workers)
-        return _build_error_results(uploaded_files + failed_files, model_variant, error_msg=str(e))
+    # Start all operations in parallel (non-blocking)
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {}
+
+        for uf in uploaded_files:
+            gcs_uri = uf['gcs_uri']
+
+            # Each file gets its own request (GCP limitation with inline response)
+            future = executor.submit(
+                start_transcription,
+                speech_client,
+                gcs_uri,
+                model_variant,
+                recognizer_location,
+                project_id,
+                language_code
+            )
+            futures[future] = uf
+
+        # Collect operations as they start
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Starting operations"):
+            uf = futures[future]
+            try:
+                operation = future.result()
+                operations.append((operation, uf))
+            except Exception as e:
+                print(f"  ✗ Failed to start {uf['gcs_filename']}: {e}")
+                failed_files.append({
+                    'item': uf['item'],
+                    'status': 'error',
+                    'error_message': f"Failed to start: {str(e)}"
+                })
+
+    print(f"  ✓ Started {len(operations)}/{len(uploaded_files)} operations")
 
     # ===========================================================================
-    # PHASE 4: Poll ONE operation until complete
+    # PHASE 4: Wait for all operations to complete
     # ===========================================================================
-    print(f"\n[Batch API] Waiting for batch operation to complete...")
-    print(f"  This may take a while for {len(file_metadata_list)} files...")
-    print(f"  Timeout: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
+    print(f"\n[Transcription] Waiting for {len(operations)} operations to complete...")
+    print(f"  Timeout per file: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
 
     batch_start = time.time()
-
-    try:
-        response = operation.result(timeout=transcribe_timeout)
-        batch_time = time.time() - batch_start
-        print(f"  ✓ Batch completed in {batch_time:.1f}s ({batch_time/60:.1f} minutes)")
-    except Exception as e:
-        print(f"  ✗ Batch operation failed or timed out: {e}")
-        # Cleanup and return errors
-        _cleanup_gcs_files(bucket, [uf['gcs_filename'] for uf in uploaded_files], upload_workers)
-        return _build_error_results(uploaded_files + failed_files, model_variant, error_msg=f"Batch timeout: {e}")
 
     # ===========================================================================
     # PHASE 5: Process results and cleanup
     # ===========================================================================
-    print(f"\n[Results] Processing {len(uploaded_files)} transcriptions...")
+    print(f"\n[Results] Processing {len(operations)} transcription results...")
 
     results = []
 
-    for uf in tqdm(uploaded_files, desc="Processing results"):
+    for operation, uf in tqdm(operations, desc="Collecting results"):
+        file_start = time.time()
         gcs_uri = uf['gcs_uri']
 
         try:
+            # Wait for this operation to complete
+            response = operation.result(timeout=transcribe_timeout)
             transcript = parse_gcp_response(response, gcs_uri)
+            transcribe_time = time.time() - file_start
 
             results.append({
                 'file_id': uf['item']['file_id'],
                 'collection_number': uf['item']['collection_number'],
                 'hypothesis': transcript,
                 'duration_sec': uf['duration'],
-                'processing_time_sec': batch_time / len(uploaded_files),  # Amortized time
+                'processing_time_sec': transcribe_time,
                 'model_name': f"gcp-{model_variant}",
                 'status': 'success',
                 'ground_truth': uf['item'].get('ground_truth'),
@@ -475,9 +489,12 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
                 'collection_number': uf['item']['collection_number'],
                 'hypothesis': '',
                 'status': 'error',
-                'error_message': f"Result parsing error: {str(e)}",
+                'error_message': f"Transcription error: {str(e)}",
                 'model_name': f"gcp-{model_variant}"
             })
+
+    batch_time = time.time() - batch_start
+    print(f"  ✓ Completed {len(results)} transcriptions in {batch_time:.1f}s ({batch_time/60:.1f} minutes)")
 
     # Add failed files to results
     for ff in failed_files:
