@@ -1,0 +1,47 @@
+# Test experiment: GCP Chirp 3 with 100 files
+# Purpose: Validate BOTH memory optimization AND evaluation script fixes
+# - Tests max_concurrent_preprocessing (memory safety)
+# - Tests corrected evaluate.py (ground truth lookup fix)
+
+experiment_id: test-gcp-chirp3-sample100-vhp-pre2010
+
+model:
+  name: "gcp_chirp"
+  model_variant: "chirp_3"  # Chirp 3
+
+  # GCP-specific settings
+  gcp:
+    project_id: "memoirji-amia-2025"
+    credentials_path: "credentials/gcloud/application_default_credentials.json"
+    temp_bucket: "memoirji-amia-2025-temp"
+
+    # Memory-safe settings for 100 files
+    max_concurrent_preprocessing: 10  # Only 10 files in memory at once (memory fix)
+    upload_workers: 30                # Upload can be higher (network-bound)
+    transcribe_workers: 20            # GCP API workers
+    batch_size: 50                    # Process 50 files per batch (2 batches total)
+
+    # API settings
+    language_code: "en-US"
+    upload_timeout: 600       # 10 minutes for upload
+    transcribe_timeout: 14400 # 4 hours for long audio
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 100  # 100 files to test memory handling
+  duration_sec: null  # Full file duration
+  sample_rate: 16000
+
+output:
+  dir: "outputs/test-gcp-chirp3-sample100-vhp-pre2010"
+  save_per_file: true  # Save individual hyp_{id}.txt files
+
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper normalizer for better WER
+
+wandb:
+  project: amia-stt
+  group: test-commercial-api
+  tags: ["gcp-chirp3", "test", "sample100", "memory-fix", "eval-fix", "commercial-api"]
