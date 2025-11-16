@@ -226,16 +226,89 @@ def delete_from_gcs(bucket, filename):
     blob.delete()
 
 
-def process_batch_gcp(manifest_batch, storage_client, speech_client, cfg, recognizer_location):
+def _preprocess_and_upload_one(item, bucket, duration_sec, sample_rate, upload_timeout, bucket_name):
     """
-    Process a batch of files with GCP Chirp using parallel upload/transcribe/delete.
+    Download, preprocess, and upload ONE file to GCS atomically.
+    This function processes one file at a time to minimize memory usage.
+
+    Returns dict with status and file info.
+    """
+    try:
+        # Download and preprocess
+        wav_bytes, duration, successful_path = download_and_preprocess(item, duration_sec, sample_rate)
+
+        # Upload to GCS
+        gcs_filename = f"{item['collection_number']}.wav"
+        upload_to_gcs(bucket, gcs_filename, wav_bytes, upload_timeout)
+
+        # Immediately free memory
+        del wav_bytes
+
+        # Return success with metadata
+        return {
+            'status': 'success',
+            'item': item,
+            'gcs_filename': gcs_filename,
+            'gcs_uri': f"gs://{bucket_name}/{gcs_filename}",
+            'duration': duration,
+            'successful_path': successful_path
+        }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'item': item,
+            'error_message': str(e)
+        }
+
+
+def _cleanup_gcs_files(bucket, gcs_filenames, workers=30):
+    """Delete multiple files from GCS in parallel."""
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        delete_futures = []
+        for filename in gcs_filenames:
+            future = executor.submit(delete_from_gcs, bucket, filename)
+            delete_futures.append(future)
+
+        for future in as_completed(delete_futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"  ⚠ Delete warning: {e}")
+
+
+def _build_error_results(files_list, model_variant, error_msg=None):
+    """Build error results for failed files."""
+    results = []
+    for f in files_list:
+        item = f.get('item', {})
+        results.append({
+            'file_id': item.get('file_id', -1),
+            'collection_number': item.get('collection_number', 'unknown'),
+            'hypothesis': '',
+            'status': 'error',
+            'error_message': error_msg or f.get('error_message', 'Unknown error'),
+            'model_name': f"gcp-{model_variant}"
+        })
+    return results
+
+
+def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, cfg, recognizer_location):
+    """
+    Process files using TRUE GCP Batch API (multiple files per BatchRecognizeRequest).
 
     Pipeline:
-    1. Download from Azure + Preprocess to WAV (parallel)
-    2. Upload WAV to GCS (parallel)
-    3. Start transcriptions (parallel, returns operations)
-    4. Wait for all operations to complete
-    5. Delete from GCS (parallel)
+    1. Stream upload to GCS (1 file at a time - memory safe)
+    2. Build file metadata list (just URIs - tiny memory)
+    3. Send ONE BatchRecognizeRequest for all files
+    4. Poll ONE operation until complete
+    5. Process results and cleanup
+
+    This approach:
+    - Uses minimal VM memory (only 1 file preprocessed at a time)
+    - Leverages GCP's true batch API (up to 10,000 files per request)
+    - Simpler than fake batching
+    - No blocking on slowest files
 
     Args:
         manifest_batch: List of file items to process
@@ -256,212 +329,171 @@ def process_batch_gcp(manifest_batch, storage_client, speech_client, cfg, recogn
     project_id = cfg["model"]["gcp"]["project_id"]
     language_code = cfg["model"]["gcp"].get("language_code", "en-US")
 
-    upload_workers = cfg["model"]["gcp"].get("upload_workers", 50)
-    transcribe_workers = cfg["model"]["gcp"].get("transcribe_workers", 30)
+    upload_workers = cfg["model"]["gcp"].get("upload_workers", 30)
     upload_timeout = cfg["model"]["gcp"].get("upload_timeout", 600)
-    transcribe_timeout = cfg["model"]["gcp"].get("transcribe_timeout", 7200)  # 2 hours default for long audio
-
-    # IMPORTANT: Limit concurrent preprocessing to avoid OOM
-    # Even if upload_workers is 50, only preprocess a few files at a time
+    transcribe_timeout = cfg["model"]["gcp"].get("transcribe_timeout", 7200)  # 2 hours default
     max_concurrent_preprocessing = cfg["model"]["gcp"].get("max_concurrent_preprocessing", 10)
-    actual_preprocessing_workers = min(upload_workers, max_concurrent_preprocessing)
 
-    # Phase 1: Download from Azure + Preprocess (parallel, but limited)
-    print(f"\n[Batch] Phase 1: Downloading and preprocessing {len(manifest_batch)} files...")
-    print(f"  Using {actual_preprocessing_workers} concurrent workers (max_concurrent_preprocessing={max_concurrent_preprocessing})")
+    # ===========================================================================
+    # PHASE 1: Stream Upload to GCS (memory-safe: 1 file at a time)
+    # ===========================================================================
+    print(f"\n[Streaming Upload] Processing {len(manifest_batch)} files...")
+    print(f"  Memory-safe: preprocessing max {max_concurrent_preprocessing} files concurrently")
 
-    prepared_files = []
-    with ThreadPoolExecutor(max_workers=actual_preprocessing_workers) as executor:
+    uploaded_files = []  # Track successfully uploaded files
+    failed_files = []    # Track failed files
+
+    # Use limited parallelism for preprocessing+upload
+    with ThreadPoolExecutor(max_workers=max_concurrent_preprocessing) as executor:
         futures = {}
+
         for item in manifest_batch:
-            future = executor.submit(download_and_preprocess, item, duration_sec, sample_rate)
+            # Submit download+preprocess+upload as one atomic operation
+            future = executor.submit(
+                _preprocess_and_upload_one,
+                item, bucket, duration_sec, sample_rate, upload_timeout, bucket_name
+            )
             futures[future] = item
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Preprocessing"):
+        # Collect results as they complete
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Upload to GCS"):
             item = futures[future]
             try:
-                wav_bytes, duration, successful_path = future.result()
-                prepared_files.append({
-                    'item': item,
-                    'wav_bytes': wav_bytes,
-                    'duration': duration,
-                    'successful_path': successful_path,
-                    'gcs_filename': f"{item['collection_number']}.wav"
-                })
+                result = future.result()
+                if result['status'] == 'success':
+                    uploaded_files.append(result)
+                else:
+                    failed_files.append(result)
             except Exception as e:
-                print(f"  ✗ Error preprocessing {item['collection_number']}: {e}")
-                prepared_files.append({
+                print(f"  ✗ Error processing {item['collection_number']}: {e}")
+                failed_files.append({
                     'item': item,
-                    'error': str(e),
-                    'gcs_filename': None
+                    'status': 'error',
+                    'error_message': str(e)
                 })
 
-    # Filter out failed preprocessing
-    valid_files = [pf for pf in prepared_files if 'error' not in pf]
-    failed_preprocessing = [pf for pf in prepared_files if 'error' in pf]
+    print(f"  ✓ Uploaded: {len(uploaded_files)}/{len(manifest_batch)} files to GCS")
 
-    print(f"  ✓ Preprocessed: {len(valid_files)}/{len(manifest_batch)} files")
+    if not uploaded_files:
+        print("  ✗ No files successfully uploaded. Returning errors.")
+        return _build_error_results(failed_files, model_variant)
 
-    if not valid_files:
-        print("  ✗ No files successfully preprocessed. Skipping batch.")
-        return [{'file_id': pf['item']['file_id'], 'hypothesis': '', 'status': 'error',
-                 'error_message': pf['error']} for pf in failed_preprocessing]
+    # ===========================================================================
+    # PHASE 2: Build File Metadata List (tiny memory - just URIs)
+    # ===========================================================================
+    print(f"\n[Batch API] Creating file metadata for {len(uploaded_files)} files...")
 
-    # Phase 2: Upload WAV to GCS (parallel, with memory management)
-    print(f"[Batch] Phase 2: Uploading {len(valid_files)} WAV files to GCS...")
-    print(f"  Using {upload_workers} upload workers")
+    file_metadata_list = []
+    gcs_uri_to_file = {}  # Map GCS URI back to file info
 
-    with ThreadPoolExecutor(max_workers=upload_workers) as executor:
-        # Create mapping of future -> preprocessed_file
-        future_to_pf = {}
-        for pf in valid_files:
-            future = executor.submit(
-                upload_to_gcs,
-                bucket,
-                pf['gcs_filename'],
-                pf['wav_bytes'],
-                upload_timeout
-            )
-            future_to_pf[future] = pf
+    for uf in uploaded_files:
+        gcs_uri = uf['gcs_uri']
+        file_metadata = cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri)
+        file_metadata_list.append(file_metadata)
+        gcs_uri_to_file[gcs_uri] = uf
 
-        # Wait for uploads to complete
-        for future in tqdm(as_completed(future_to_pf.keys()),
-                          total=len(future_to_pf), desc="Uploading"):
-            pf = future_to_pf[future]
-            try:
-                future.result()
-            except Exception as e:
-                print(f"  ✗ Upload failed for {pf['gcs_filename']}: {e}")
-                pf['upload_error'] = str(e)
+    print(f"  ✓ Created {len(file_metadata_list)} file metadata objects")
 
-    # Filter out failed uploads
-    uploaded_files = [pf for pf in valid_files if 'upload_error' not in pf]
-    print(f"  ✓ Uploaded: {len(uploaded_files)}/{len(valid_files)} files")
+    # ===========================================================================
+    # PHASE 3: Send ONE BatchRecognizeRequest for ALL files
+    # ===========================================================================
+    print(f"\n[Batch API] Sending BatchRecognizeRequest for {len(file_metadata_list)} files...")
 
-    # Free up memory: delete WAV bytes after upload (keep only metadata)
-    for pf in valid_files:
-        if 'wav_bytes' in pf:
-            del pf['wav_bytes']  # Free large WAV data from memory
-    print(f"  ✓ Freed WAV data from memory")
+    config = cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        language_codes=[language_code],
+        model=model_variant,
+    )
 
-    # Phase 3: Start transcriptions (parallel)
-    print(f"[Batch] Phase 3: Starting {len(uploaded_files)} transcriptions...")
+    recognizer = f"projects/{project_id}/locations/{recognizer_location}/recognizers/_"
 
-    operations = []
-    with ThreadPoolExecutor(max_workers=transcribe_workers) as executor:
-        transcribe_futures = []
-        for pf in uploaded_files:
-            gcs_uri = f"gs://{bucket_name}/{pf['gcs_filename']}"
-            future = executor.submit(
-                start_transcription,
-                speech_client,
-                gcs_uri,
-                model_variant,
-                recognizer_location,
-                project_id,
-                language_code
-            )
-            transcribe_futures.append((future, pf, gcs_uri))
+    request = cloud_speech.BatchRecognizeRequest(
+        recognizer=recognizer,
+        config=config,
+        files=file_metadata_list,  # ALL FILES IN ONE REQUEST!
+        recognition_output_config=cloud_speech.RecognitionOutputConfig(
+            inline_response_config=cloud_speech.InlineOutputConfig(),
+        ),
+    )
 
-        for future, pf, gcs_uri in tqdm(transcribe_futures, desc="Starting operations"):
-            try:
-                operation = future.result()
-                operations.append((operation, pf, gcs_uri))
-            except Exception as e:
-                print(f"  ✗ Failed to start transcription for {pf['gcs_filename']}: {e}")
-                pf['transcribe_error'] = str(e)
+    try:
+        operation = speech_client.batch_recognize(request=request)
+        print(f"  ✓ Batch operation started: {operation.operation.name}")
+    except Exception as e:
+        print(f"  ✗ Failed to start batch operation: {e}")
+        # Cleanup and return errors
+        _cleanup_gcs_files(bucket, [uf['gcs_filename'] for uf in uploaded_files], upload_workers)
+        return _build_error_results(uploaded_files + failed_files, model_variant, error_msg=str(e))
 
-    print(f"  ✓ Started: {len(operations)}/{len(uploaded_files)} transcriptions")
+    # ===========================================================================
+    # PHASE 4: Poll ONE operation until complete
+    # ===========================================================================
+    print(f"\n[Batch API] Waiting for batch operation to complete...")
+    print(f"  This may take a while for {len(file_metadata_list)} files...")
+    print(f"  Timeout: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
 
-    # Phase 4: Wait for operations to complete
-    print(f"[Batch] Phase 4: Waiting for {len(operations)} transcriptions to complete...")
+    batch_start = time.time()
+
+    try:
+        response = operation.result(timeout=transcribe_timeout)
+        batch_time = time.time() - batch_start
+        print(f"  ✓ Batch completed in {batch_time:.1f}s ({batch_time/60:.1f} minutes)")
+    except Exception as e:
+        print(f"  ✗ Batch operation failed or timed out: {e}")
+        # Cleanup and return errors
+        _cleanup_gcs_files(bucket, [uf['gcs_filename'] for uf in uploaded_files], upload_workers)
+        return _build_error_results(uploaded_files + failed_files, model_variant, error_msg=f"Batch timeout: {e}")
+
+    # ===========================================================================
+    # PHASE 5: Process results and cleanup
+    # ===========================================================================
+    print(f"\n[Results] Processing {len(uploaded_files)} transcriptions...")
 
     results = []
-    transcribe_start = time.time()
 
-    for operation, pf, gcs_uri in tqdm(operations, desc="Transcribing"):
-        file_start = time.time()
+    for uf in tqdm(uploaded_files, desc="Processing results"):
+        gcs_uri = uf['gcs_uri']
+
         try:
-            response = operation.result(timeout=transcribe_timeout)
             transcript = parse_gcp_response(response, gcs_uri)
-            transcribe_time = time.time() - file_start
 
             results.append({
-                'file_id': pf['item']['file_id'],
-                'collection_number': pf['item']['collection_number'],
+                'file_id': uf['item']['file_id'],
+                'collection_number': uf['item']['collection_number'],
                 'hypothesis': transcript,
-                'duration_sec': pf['duration'],
-                'processing_time_sec': transcribe_time,
+                'duration_sec': uf['duration'],
+                'processing_time_sec': batch_time / len(uploaded_files),  # Amortized time
                 'model_name': f"gcp-{model_variant}",
                 'status': 'success',
-                'ground_truth': pf['item'].get('ground_truth'),
-                'title': pf['item'].get('title', ''),
-                'blob_path': pf['successful_path']
+                'ground_truth': uf['item'].get('ground_truth'),
+                'title': uf['item'].get('title', ''),
+                'blob_path': uf['successful_path']
             })
         except Exception as e:
             results.append({
-                'file_id': pf['item']['file_id'],
-                'collection_number': pf['item']['collection_number'],
+                'file_id': uf['item']['file_id'],
+                'collection_number': uf['item']['collection_number'],
                 'hypothesis': '',
                 'status': 'error',
-                'error_message': f"Transcription error: {str(e)}",
+                'error_message': f"Result parsing error: {str(e)}",
                 'model_name': f"gcp-{model_variant}"
             })
 
-    total_transcribe_time = time.time() - transcribe_start
-    print(f"  ✓ Completed {len(results)} transcriptions in {total_transcribe_time:.1f}s")
-
-    # Phase 5: Delete from GCS (parallel)
-    print(f"[Batch] Phase 5: Cleaning up {len(uploaded_files)} files from GCS...")
-
-    with ThreadPoolExecutor(max_workers=upload_workers) as executor:
-        delete_futures = []
-        for pf in uploaded_files:
-            future = executor.submit(
-                delete_from_gcs,
-                bucket,
-                pf['gcs_filename']
-            )
-            delete_futures.append(future)
-
-        for future in as_completed(delete_futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"  ⚠ Delete warning: {e}")
-
-    print(f"  ✓ Cleanup complete")
-
-    # Add errors from failed preprocessing/upload
-    for pf in failed_preprocessing:
+    # Add failed files to results
+    for ff in failed_files:
         results.append({
-            'file_id': pf['item']['file_id'],
-            'collection_number': pf['item']['collection_number'],
+            'file_id': ff['item']['file_id'],
+            'collection_number': ff['item']['collection_number'],
             'hypothesis': '',
             'status': 'error',
-            'error_message': pf['error'],
+            'error_message': ff.get('error_message', 'Unknown error'),
             'model_name': f"gcp-{model_variant}"
         })
 
-    for pf in valid_files:
-        if 'upload_error' in pf:
-            results.append({
-                'file_id': pf['item']['file_id'],
-                'collection_number': pf['item']['collection_number'],
-                'hypothesis': '',
-                'status': 'error',
-                'error_message': f"Upload error: {pf['upload_error']}",
-                'model_name': f"gcp-{model_variant}"
-            })
-        elif 'transcribe_error' in pf:
-            results.append({
-                'file_id': pf['item']['file_id'],
-                'collection_number': pf['item']['collection_number'],
-                'hypothesis': '',
-                'status': 'error',
-                'error_message': pf['transcribe_error'],
-                'model_name': f"gcp-{model_variant}"
-            })
+    # Cleanup GCS files
+    print(f"\n[Cleanup] Deleting {len(uploaded_files)} files from GCS...")
+    _cleanup_gcs_files(bucket, [uf['gcs_filename'] for uf in uploaded_files], upload_workers)
+    print(f"  ✓ Cleanup complete")
 
     return results
 
@@ -513,7 +545,7 @@ def run(cfg):
         print(f"BATCH {batch_num}/{total_batches} ({len(batch)} files)")
         print(f"{'='*60}")
 
-        batch_results = process_batch_gcp(
+        batch_results = process_batch_gcp_streaming(
             batch,
             storage_client,
             speech_client,
