@@ -521,6 +521,16 @@ def run(cfg):
     df_results.to_parquet(parquet_path, index=False)
     print(f"✓ Saved per-file results: {parquet_path}")
 
+    # Save individual hypothesis files (if enabled)
+    if cfg["output"].get("save_per_file", False):
+        for result in all_results:
+            if result['status'] == 'success':
+                file_id = result['file_id']
+                per_file_path = out_dir / f"hyp_{file_id}.txt"
+                with open(per_file_path, "w") as f:
+                    f.write(result['hypothesis'])
+        print(f"✓ Saved individual hypothesis files for {sum(1 for r in all_results if r['status'] == 'success')} successful transcriptions")
+
     # Save hypothesis text file (for legacy compatibility)
     model_variant = cfg["model"]["model_variant"]
     hyp_path = out_dir / f"hyp_gcp_{model_variant}.txt"
