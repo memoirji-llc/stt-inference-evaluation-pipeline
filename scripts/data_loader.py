@@ -50,12 +50,16 @@ def load_vhp_dataset(
         df_sampled = df.sample(n=sample_size, random_state=42)
         selected_original_indices = sorted(df_sampled.index.tolist())
 
-        # Reset index to 0,1,2... for blob path generation
+        # CRITICAL: Preserve original parquet index as a column before reset
+        # This is needed because Azure blob paths use the ORIGINAL indices
+        df_sampled['original_parquet_index'] = df_sampled.index
+
+        # Reset index to 0,1,2... for file_id generation
         df = df_sampled.reset_index(drop=True)
 
         print(f"Sampled {sample_size} items")
         print(f"  Original parquet row indices selected: {selected_original_indices[:5]}{'...' if len(selected_original_indices) > 5 else ''}")
-        print(f"  Will look for blob paths: loc_vhp/0/ through loc_vhp/{sample_size-1}/")
+        print(f"  Will look for blob paths using original indices: loc_vhp/{selected_original_indices[0]}/ through loc_vhp/{selected_original_indices[-1]}/")
     else:
         # No sampling - use all rows
         # CRITICAL: Reset index to 0,1,2... to match upload script sequential indices
@@ -73,11 +77,11 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     Returns a list of candidate paths to try, in order of preference.
 
     Matches the naming convention from loc_vhp_2_az_blob.py:
-    {prefix}/{idx}/{media_type}.{ext}
+    {prefix}/{original_index}/{media_type}.{ext}
 
     Args:
-        row: DataFrame row with video_url/audio_url
-        idx: Row index (used in blob path)
+        row: DataFrame row with video_url/audio_url and optional 'original_parquet_index'
+        idx: Row index (fallback if original_parquet_index not available)
         blob_prefix: Blob storage prefix (default: "vhp")
 
     Returns:
@@ -85,14 +89,8 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     """
     candidates = []
 
-    # CRITICAL: After sampling + reset_index, the row index (0-9) doesn't match
-    # the original parquet index that was used during upload.
-    # The upload script used the ORIGINAL parquet indices (0-10432), but
-    # we're using RESET indices (0-9) after sampling.
-    # So we CANNOT trust the parquet URLs to predict what blob path exists!
-    #
-    # Solution: Always try BOTH video.mp4 AND audio.mp3 for each index.
-    # This way we'll find whatever actually got uploaded.
+    # Use original parquet index if available (from sampling), otherwise use idx
+    blob_idx = row.get('original_parquet_index', idx)
 
     has_video = pd.notnull(row.get('video_url')) and str(row['video_url']).strip()
     has_audio = pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip()
@@ -100,9 +98,9 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     # If row has any media URL, try both video and audio paths
     if has_video or has_audio:
         # Try video first (upload script prefers video)
-        candidates.append(f"{blob_prefix}/{idx}/video.mp4")
+        candidates.append(f"{blob_prefix}/{blob_idx}/video.mp4")
         # Then try audio as fallback
-        candidates.append(f"{blob_prefix}/{idx}/audio.mp3")
+        candidates.append(f"{blob_prefix}/{blob_idx}/audio.mp3")
 
     return candidates
 
