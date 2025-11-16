@@ -1,7 +1,7 @@
-# Test experiment: GCP Chirp 3 with 5 files (local testing)
+# Test experiment: GCP Chirp 3 with 10 files (local testing)
 # Quick test to validate GCP integration before running larger experiments
 
-experiment_id: test-gcp-chirp3-sample5
+experiment_id: test-gcp-chirp3-sample5-vhp-pre2010
 
 model:
   name: "gcp_chirp"
@@ -15,8 +15,8 @@ model:
 
     # Parallelization settings (conservative for testing)
     upload_workers: 10
-    transcribe_workers: 5
-    batch_size: 5  # Process all 5 files in one batch
+    transcribe_workers: 10
+    batch_size: 10
 
     # API settings
     language_code: "en-US"
@@ -27,12 +27,12 @@ input:
   source: "azure_blob"
   parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
   blob_prefix: "loc_vhp"
-  sample_size: 5  # Only 5 files for testing
+  sample_size: 10  # Only 5 files for testing
   duration_sec: null  # null = full file duration
   sample_rate: 16000  # Informational only (preprocessing uses this)
 
 output:
-  dir: "outputs/test-gcp-chirp3-sample5"
+  dir: "outputs/test-gcp-chirp3-sample5-vhp-pre2010"
   save_per_file: true
 
 wandb:
