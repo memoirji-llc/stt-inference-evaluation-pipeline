@@ -21,7 +21,7 @@ model:
     # API settings
     language_code: "en-US"
     upload_timeout: 600  # Upload timeout in seconds (10 minutes for large files)
-    transcribe_timeout: 600  # Transcription timeout in seconds per file
+    transcribe_timeout: 14400  # Transcription timeout in seconds (4 hours - GCP supports up to 8hr audio)
 
 input:
   source: "azure_blob"
@@ -34,6 +34,9 @@ input:
 output:
   dir: "outputs/test-gcp-chirp3-sample5-vhp-pre2010"
   save_per_file: true
+
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper normalizer to handle punctuation/formatting differences
 
 wandb:
   project: amia-stt
