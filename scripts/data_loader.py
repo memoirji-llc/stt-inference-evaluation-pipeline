@@ -80,8 +80,8 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     {prefix}/{original_index}/{media_type}.{ext}
 
     Args:
-        row: DataFrame row with video_url/audio_url and optional 'original_parquet_index'
-        idx: Row index (fallback if original_parquet_index not available)
+        row: DataFrame row with video_url/audio_url and optional 'azure_blob_index' or 'original_parquet_index'
+        idx: Row index (fallback if neither azure_blob_index nor original_parquet_index available)
         blob_prefix: Blob storage prefix (default: "vhp")
 
     Returns:
@@ -89,8 +89,11 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     """
     candidates = []
 
-    # Use original parquet index if available (from sampling), otherwise use idx
-    blob_idx = row.get('original_parquet_index', idx)
+    # Priority order for blob index:
+    # 1. azure_blob_index (pre-computed mapping for pre-2010 parquet)
+    # 2. original_parquet_index (preserved from sampling)
+    # 3. idx (fallback - current row index)
+    blob_idx = row.get('azure_blob_index', row.get('original_parquet_index', idx))
 
     has_video = pd.notnull(row.get('video_url')) and str(row['video_url']).strip()
     has_audio = pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip()
