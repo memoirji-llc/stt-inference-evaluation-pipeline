@@ -259,7 +259,7 @@ def process_batch_gcp(manifest_batch, storage_client, speech_client, cfg, recogn
     upload_workers = cfg["model"]["gcp"].get("upload_workers", 50)
     transcribe_workers = cfg["model"]["gcp"].get("transcribe_workers", 30)
     upload_timeout = cfg["model"]["gcp"].get("upload_timeout", 600)
-    transcribe_timeout = cfg["model"]["gcp"].get("transcribe_timeout", 600)
+    transcribe_timeout = cfg["model"]["gcp"].get("transcribe_timeout", 7200)  # 2 hours default for long audio
 
     # Phase 1: Download from Azure + Preprocess (parallel)
     print(f"\n[Batch] Phase 1: Downloading and preprocessing {len(manifest_batch)} files...")
