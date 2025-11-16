@@ -14,10 +14,12 @@ model:
     credentials_path: "credentials/gcloud/application_default_credentials.json"
     temp_bucket: "memoirji-amia-2025-temp"
 
-    # Parallelization settings (moderate for large batch)
-    upload_workers: 50
-    transcribe_workers: 20
-    batch_size: 100
+    # Parallelization settings (VM-friendly for large dataset)
+    # IMPORTANT: max_concurrent_preprocessing limits Phase 1 memory usage
+    max_concurrent_preprocessing: 10  # Only preprocess 10 files at a time (avoid OOM)
+    upload_workers: 30                # Upload after preprocessing (network-bound, can be higher)
+    transcribe_workers: 20            # GCP transcription workers (API quota-bound)
+    batch_size: 50                    # Process 50 files per batch (then save checkpoint)
 
     # API settings
     language_code: "en-US"

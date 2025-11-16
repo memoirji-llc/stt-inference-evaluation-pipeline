@@ -14,6 +14,7 @@ model:
     temp_bucket: "memoirji-amia-2025-temp"
 
     # Parallelization settings (conservative for testing)
+    max_concurrent_preprocessing: 5  # Only preprocess 5 files at a time (memory-safe)
     upload_workers: 10
     transcribe_workers: 10
     batch_size: 10

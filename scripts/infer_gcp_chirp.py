@@ -261,11 +261,17 @@ def process_batch_gcp(manifest_batch, storage_client, speech_client, cfg, recogn
     upload_timeout = cfg["model"]["gcp"].get("upload_timeout", 600)
     transcribe_timeout = cfg["model"]["gcp"].get("transcribe_timeout", 7200)  # 2 hours default for long audio
 
-    # Phase 1: Download from Azure + Preprocess (parallel)
+    # IMPORTANT: Limit concurrent preprocessing to avoid OOM
+    # Even if upload_workers is 50, only preprocess a few files at a time
+    max_concurrent_preprocessing = cfg["model"]["gcp"].get("max_concurrent_preprocessing", 10)
+    actual_preprocessing_workers = min(upload_workers, max_concurrent_preprocessing)
+
+    # Phase 1: Download from Azure + Preprocess (parallel, but limited)
     print(f"\n[Batch] Phase 1: Downloading and preprocessing {len(manifest_batch)} files...")
+    print(f"  Using {actual_preprocessing_workers} concurrent workers (max_concurrent_preprocessing={max_concurrent_preprocessing})")
 
     prepared_files = []
-    with ThreadPoolExecutor(max_workers=upload_workers) as executor:
+    with ThreadPoolExecutor(max_workers=actual_preprocessing_workers) as executor:
         futures = {}
         for item in manifest_batch:
             future = executor.submit(download_and_preprocess, item, duration_sec, sample_rate)
@@ -301,8 +307,9 @@ def process_batch_gcp(manifest_batch, storage_client, speech_client, cfg, recogn
         return [{'file_id': pf['item']['file_id'], 'hypothesis': '', 'status': 'error',
                  'error_message': pf['error']} for pf in failed_preprocessing]
 
-    # Phase 2: Upload WAV to GCS (parallel)
+    # Phase 2: Upload WAV to GCS (parallel, with memory management)
     print(f"[Batch] Phase 2: Uploading {len(valid_files)} WAV files to GCS...")
+    print(f"  Using {upload_workers} upload workers")
 
     with ThreadPoolExecutor(max_workers=upload_workers) as executor:
         # Create mapping of future -> preprocessed_file
@@ -330,6 +337,12 @@ def process_batch_gcp(manifest_batch, storage_client, speech_client, cfg, recogn
     # Filter out failed uploads
     uploaded_files = [pf for pf in valid_files if 'upload_error' not in pf]
     print(f"  ✓ Uploaded: {len(uploaded_files)}/{len(valid_files)} files")
+
+    # Free up memory: delete WAV bytes after upload (keep only metadata)
+    for pf in valid_files:
+        if 'wav_bytes' in pf:
+            del pf['wav_bytes']  # Free large WAV data from memory
+    print(f"  ✓ Freed WAV data from memory")
 
     # Phase 3: Start transcriptions (parallel)
     print(f"[Batch] Phase 3: Starting {len(uploaded_files)} transcriptions...")
