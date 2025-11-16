@@ -1,5 +1,6 @@
-# Test experiment: GCP Chirp 3 with 5 files (local testing)
-# Quick test to validate GCP integration before running larger experiments
+# Experiment: GCP Chirp 3, ALL pre-2010 files, full duration (GPU inference-only)
+# Complete dataset benchmark - NO SAMPLING, NO EVALUATION
+# This will only generate transcripts (inference_results.parquet + hypothesis files)
 
 experiment_id: vhp-pre2010-chirp3-full-gpu
 
@@ -13,15 +14,15 @@ model:
     credentials_path: "credentials/gcloud/application_default_credentials.json"
     temp_bucket: "memoirji-amia-2025-temp"
 
-    # Parallelization settings
-    upload_workers: 100
-    transcribe_workers: 30
-    batch_size: 200
+    # Parallelization settings (moderate for large batch)
+    upload_workers: 50
+    transcribe_workers: 20
+    batch_size: 100
 
     # API settings
     language_code: "en-US"
     upload_timeout: 600  # Upload timeout in seconds (10 minutes for large files)
-    transcribe_timeout: 600  # Transcription timeout in seconds per file
+    transcribe_timeout: 14400  # Transcription timeout in seconds (4 hours - GCP supports up to 8hr audio)
 
 input:
   source: "azure_blob"
@@ -33,9 +34,12 @@ input:
 
 output:
   dir: "outputs/vhp-pre2010-chirp3-full-gpu"
-  save_per_file: true
+  save_per_file: true  # Save individual hyp_{id}.txt files
+
+# NOTE: No evaluation section - run inference only
+# To evaluate later, use: uv run python scripts/evaluate.py --config <this-file> --inference_results <output>/inference_results.parquet --parquet <path-to-parquet>
 
 wandb:
   project: amia-stt
-  group: experiments-gpu-full-dataset
-  tags: ["gcp", "chirp3", "commercial-api", "record-pre2010", "full-duration", "gpu", "t4"]
+  group: experiments-commercial-api-full
+  tags: ["gcp-chirp3", "pre2010", "all-files", "full-duration", "commercial-api", "inference-only"]
