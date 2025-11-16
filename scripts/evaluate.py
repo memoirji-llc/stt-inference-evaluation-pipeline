@@ -182,21 +182,12 @@ def evaluate_parquet_workflow(args):
         file_id = row["file_id"]
         hypothesis = row["hypothesis"]
 
-        # Get ground truth from parquet
-        if file_id < len(df_gt):
-            gt_row = df_gt.iloc[file_id]
+        # Get ground truth from inference results (already embedded correctly)
+        # The ground_truth column was populated during inference with the correct mapping
+        reference = row.get('ground_truth', None)
 
-            # Check if we have cleaned transcript column
-            if 'transcript_raw_text_only' in df_gt.columns and pd.notnull(gt_row.get('transcript_raw_text_only')):
-                reference = gt_row['transcript_raw_text_only']
-            elif 'fulltext_file_str' in df_gt.columns and pd.notnull(gt_row.get('fulltext_file_str')):
-                # Clean the raw XML transcript
-                reference = clean_raw_transcript_str(gt_row['fulltext_file_str'])
-            else:
-                print(f"[{file_id}] No ground truth transcript available")
-                reference = None
-        else:
-            print(f"[{file_id}] file_id out of range for ground truth data")
+        if reference is None:
+            print(f"[{file_id}] No ground truth available in inference results")
             reference = None
 
         # Compute WER if we have both reference and hypothesis
