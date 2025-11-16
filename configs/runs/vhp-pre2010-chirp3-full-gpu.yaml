@@ -16,7 +16,8 @@ model:
 
     # Parallelization settings (VM-friendly for large dataset)
     # IMPORTANT: max_concurrent_preprocessing limits Phase 1 memory usage
-    max_concurrent_preprocessing: 10  # Only preprocess 10 files at a time (avoid OOM)
+    # VHP files are large (50-100MB each), so keep this LOW to avoid OOM
+    max_concurrent_preprocessing: 3   # Only 3 files at a time (avoid OOM on T4 VM)
     upload_workers: 30                # Upload after preprocessing (network-bound, can be higher)
     transcribe_workers: 20            # GCP transcription workers (API quota-bound)
     batch_size: 50                    # Process 50 files per batch (then save checkpoint)

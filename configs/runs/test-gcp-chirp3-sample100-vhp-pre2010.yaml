@@ -15,8 +15,8 @@ model:
     credentials_path: "credentials/gcloud/application_default_credentials.json"
     temp_bucket: "memoirji-amia-2025-temp"
 
-    # Memory-safe settings for 100 files
-    max_concurrent_preprocessing: 10  # Only 10 files in memory at once (memory fix)
+    # Memory-safe settings for 100 files (VERY conservative for T4 VM)
+    max_concurrent_preprocessing: 3   # Only 3 files at a time (large VHP files ~50-100MB each)
     upload_workers: 30                # Upload can be higher (network-bound)
     transcribe_workers: 20            # GCP API workers
     batch_size: 50                    # Process 50 files per batch (2 batches total)
