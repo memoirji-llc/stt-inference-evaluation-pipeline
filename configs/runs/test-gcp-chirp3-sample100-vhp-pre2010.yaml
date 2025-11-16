@@ -19,7 +19,7 @@ model:
     max_concurrent_preprocessing: 3   # Only 3 files at a time (large VHP files ~50-100MB each)
     upload_workers: 30                # Upload can be higher (network-bound)
     transcribe_workers: 20            # GCP API workers
-    batch_size: 50                    # Process 50 files per batch (2 batches total)
+    batch_size: 1000                  # Process all files in one batch (no artificial splitting)
 
     # API settings
     language_code: "en-US"

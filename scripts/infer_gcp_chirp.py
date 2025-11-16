@@ -447,33 +447,50 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
     print(f"  ✓ Started {len(operations)}/{len(uploaded_files)} operations")
 
     # ===========================================================================
-    # PHASE 4: Wait for all operations to complete
+    # PHASE 4-5: Wait for operations and process results (with detailed logging)
     # ===========================================================================
     print(f"\n[Transcription] Waiting for {len(operations)} operations to complete...")
     print(f"  Timeout per file: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
+    print(f"  GCP Console: https://console.cloud.google.com/speech/locations/{recognizer_location}?project={project_id}")
+    print(f"\n  Starting to process operations at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  {'='*70}")
 
     batch_start = time.time()
-
-    # ===========================================================================
-    # PHASE 5: Process results and cleanup
-    # ===========================================================================
-    print(f"\n[Results] Processing {len(operations)} transcription results...")
-
     results = []
 
-    for operation, uf in tqdm(operations, desc="Collecting results"):
+    # Track statistics
+    completed_count = 0
+    failed_count = 0
+
+    for idx, (operation, uf) in enumerate(operations, start=1):
         file_start = time.time()
         gcs_uri = uf['gcs_uri']
+        collection_num = uf['item']['collection_number']
+        file_id = uf['item']['file_id']
+
+        # Get operation name for logging
+        operation_name = operation.operation.name if hasattr(operation, 'operation') else 'unknown'
+
+        print(f"\n  [{idx}/{len(operations)}] File: {collection_num} (ID: {file_id})")
+        print(f"      GCS URI: {gcs_uri}")
+        print(f"      Operation: {operation_name}")
+        print(f"      Started waiting at: {time.strftime('%H:%M:%S')}")
 
         try:
             # Wait for this operation to complete
             response = operation.result(timeout=transcribe_timeout)
             transcript = parse_gcp_response(response, gcs_uri)
             transcribe_time = time.time() - file_start
+            completed_count += 1
+
+            print(f"      ✓ COMPLETED in {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+            print(f"      Transcript length: {len(transcript)} chars")
+            print(f"      Audio duration: {uf['duration']:.1f}s")
+            print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(operations) - idx} remaining")
 
             results.append({
-                'file_id': uf['item']['file_id'],
-                'collection_number': uf['item']['collection_number'],
+                'file_id': file_id,
+                'collection_number': collection_num,
                 'hypothesis': transcript,
                 'duration_sec': uf['duration'],
                 'processing_time_sec': transcribe_time,
@@ -484,9 +501,16 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
                 'blob_path': uf['successful_path']
             })
         except Exception as e:
+            transcribe_time = time.time() - file_start
+            failed_count += 1
+
+            print(f"      ✗ FAILED after {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+            print(f"      Error: {str(e)}")
+            print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(operations) - idx} remaining")
+
             results.append({
-                'file_id': uf['item']['file_id'],
-                'collection_number': uf['item']['collection_number'],
+                'file_id': file_id,
+                'collection_number': collection_num,
                 'hypothesis': '',
                 'status': 'error',
                 'error_message': f"Transcription error: {str(e)}",
@@ -494,7 +518,17 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
             })
 
     batch_time = time.time() - batch_start
-    print(f"  ✓ Completed {len(results)} transcriptions in {batch_time:.1f}s ({batch_time/60:.1f} minutes)")
+
+    print(f"\n  {'='*70}")
+    print(f"  Finished processing at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n[Results Summary]")
+    print(f"  Total operations: {len(operations)}")
+    print(f"  ✓ Completed: {completed_count}")
+    print(f"  ✗ Failed: {failed_count}")
+    print(f"  Total time: {batch_time:.1f}s ({batch_time/60:.1f} min, {batch_time/3600:.2f} hours)")
+    if completed_count > 0:
+        avg_time = sum(r.get('processing_time_sec', 0) for r in results if r['status'] == 'success') / completed_count
+        print(f"  Avg time per file: {avg_time:.1f}s ({avg_time/60:.1f} min)")
 
     # Add failed files to results
     for ff in failed_files:
