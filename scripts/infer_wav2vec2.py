@@ -24,6 +24,7 @@ import wandb
 _scripts_dir = Path(__file__).parent
 sys.path.insert(0, str(_scripts_dir))
 import azure_utils
+from file_logger import log, init_logger
 import data_loader
 
 
@@ -37,6 +38,7 @@ def run(cfg):
     - Batch processing
     - Flexible duration (full file or sliced)
     - Per-file outputs and metrics
+    - File logging (timestamped logs saved to output directory)
     """
     # Track total experiment wall-clock time
     experiment_start_time = time.time()
@@ -44,16 +46,19 @@ def run(cfg):
     out_dir = Path(cfg["output"]["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize file logger FIRST (before any log() calls)
+    init_logger(out_dir, prefix="wav2vec2")
+
     # Load model
     model_dir = cfg["model"]["dir"]
-    print(f"Loading Wav2Vec2 model from: {model_dir}")
+    log(f"Loading Wav2Vec2 model from: {model_dir}")
 
     # Get device from config
     device = cfg["model"].get("device", "cpu")
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"Device: {device}")
+    log(f"Device: {device}")
 
     # Load processor and model
     processor = AutoProcessor.from_pretrained(model_dir)
@@ -61,7 +66,7 @@ def run(cfg):
 
     # Get batch size from config
     batch_size = cfg["model"].get("batch_size", 1)
-    print(f"Batch size: {batch_size}")
+    log(f"Batch size: {batch_size}")
 
     # Determine input source
     source_type = cfg["input"].get("source", "local")
@@ -77,7 +82,7 @@ def run(cfg):
 
         df = data_loader.load_vhp_dataset(parquet_path, sample_size=sample_size)
         manifest = data_loader.prepare_inference_manifest(df, blob_prefix=blob_prefix)
-        print(f"Prepared manifest with {len(manifest)} items from Azure blob")
+        log(f"Prepared manifest with {len(manifest)} items from Azure blob")
     else:
         # Local files via glob
         audio_glob = cfg["input"]["audio_glob"]
@@ -86,7 +91,7 @@ def run(cfg):
             {"file_id": i, "blob_path_candidates": [p], "collection_number": Path(p).stem, "ground_truth": None, "title": ""}
             for i, p in enumerate(file_paths)
         ]
-        print(f"Found {len(manifest)} local files")
+        log(f"Found {len(manifest)} local files")
 
     # Run inference on all files
     results = []
@@ -103,11 +108,11 @@ def run(cfg):
             elif "blob_path" in item:
                 source_paths = [item["blob_path"]]
             else:
-                print(f"\n[{file_id}] ERROR: No blob path found in manifest")
+                log(f"\n[{file_id}] ERROR: No blob path found in manifest")
                 continue
 
             # Log attempt
-            print(f"\n[{file_id}] Processing: {collection_num}")
+            log(f"\n[{file_id}] Processing: {collection_num}")
 
             try:
                 # Load audio
@@ -134,7 +139,7 @@ def run(cfg):
                         raise FileNotFoundError(f"None of the candidate paths exist: {source_paths}")
 
                     file_size_mb = len(audio_bytes) / (1024 * 1024)
-                    print(f"  Downloaded: {file_size_mb:.2f} MB")
+                    log(f"  Downloaded: {file_size_mb:.2f} MB")
 
                     # Check if file looks valid
                     if len(audio_bytes) < 100:
@@ -142,7 +147,7 @@ def run(cfg):
 
                     # Use pydub to handle both MP3 and MP4 (video) files
                     import io
-                    print(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
+                    log(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
 
                     # Load with pydub (handles MP3, MP4, M4A, WAV, etc.)
                     audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
@@ -171,8 +176,8 @@ def run(cfg):
                     # Load from local file (also use pydub for consistency)
                     # For local files, just use the first path (should only be one)
                     source_path = source_paths[0]
-                    print(f"  File: {source_path}")
-                    print(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
+                    log(f"  File: {source_path}")
+                    log(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
                     audio_segment = AudioSegment.from_file(source_path)
                     audio_segment = audio_segment.set_channels(1)
                     audio_segment = audio_segment.set_frame_rate(sample_rate)
@@ -192,7 +197,7 @@ def run(cfg):
                     actual_duration = len(wave) / sample_rate
 
                 load_time = time.time() - start_time
-                print(f"  Audio loaded: {actual_duration:.1f}s in {load_time:.1f}s")
+                log(f"  Audio loaded: {actual_duration:.1f}s in {load_time:.1f}s")
 
                 # Transcribe
                 transcribe_start = time.time()
@@ -240,32 +245,32 @@ def run(cfg):
                 })
 
                 # Improved logging
-                print(f"  Transcription complete!")
-                print(f"    - Audio duration: {actual_duration:.1f}s")
-                print(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
-                print(f"    - Speed: {speed_factor:.1f}x realtime")
-                print(f"    - Preview: {hyp_text[:80]}...")
-                print(f"  ✓ SUCCESS")
+                log(f"  Transcription complete!")
+                log(f"    - Audio duration: {actual_duration:.1f}s")
+                log(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
+                log(f"    - Speed: {speed_factor:.1f}x realtime")
+                log(f"    - Preview: {hyp_text[:80]}...")
+                log(f"  ✓ SUCCESS")
 
             except Exception as e:
                 import traceback
                 error_type = type(e).__name__
                 error_msg = str(e)
 
-                print(f"  ✗ FAILED: {error_type}")
-                print(f"    Error: {error_msg}")
+                log(f"  ✗ FAILED: {error_type}")
+                log(f"    Error: {error_msg}")
 
                 # Additional context for common errors
                 if "Format not recognised" in error_msg or "NoBackendError" in error_type:
-                    print(f"    → This file may be corrupted, empty, or in an unsupported format")
+                    log(f"    → This file may be corrupted, empty, or in an unsupported format")
                     if source_type == "azure_blob":
                         print(f"    → Check the blob in Azure storage: {source_paths}")
                 elif "BlobNotFound" in error_type or "ResourceNotFoundError" in error_type:
-                    print(f"    → Blob does not exist in Azure storage")
-                    print(f"    → Expected paths: {source_paths}")
+                    log(f"    → Blob does not exist in Azure storage")
+                    log(f"    → Expected paths: {source_paths}")
                 elif len(error_msg) < 200:
                     # Short error, show full traceback for debugging
-                    print(f"    Traceback: {traceback.format_exc()}")
+                    log(f"    Traceback: {traceback.format_exc()}")
 
                 wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
                 results.append({
@@ -284,7 +289,7 @@ def run(cfg):
     df_results = pd.DataFrame(results)
     results_path = out_dir / "inference_results.parquet"
     df_results.to_parquet(results_path, index=False)
-    print(f"\nSaved inference results to {results_path}")
+    log(f"\nSaved inference results to {results_path}")
 
     # Calculate total experiment time
     experiment_end_time = time.time()
@@ -307,20 +312,20 @@ def run(cfg):
     })
 
     # Print summary
-    print(f"\n{'='*60}")
-    print(f"EXPERIMENT SUMMARY")
-    print(f"{'='*60}")
-    print(f"Total files: {len(results)}")
-    print(f"Successful: {len(successful)}")
-    print(f"Failed: {len(results) - len(successful)}")
-    print(f"Total audio duration: {total_audio_duration/60:.1f} minutes ({total_audio_duration/3600:.2f} hours)")
-    print(f"Total experiment time: {total_experiment_time/60:.1f} minutes ({total_experiment_time/3600:.2f} hours)")
-    print(f"Speedup: {total_audio_duration/total_experiment_time:.2f}x realtime")
-    print(f"{'='*60}")
+    log(f"\n{'='*60}")
+    log(f"EXPERIMENT SUMMARY")
+    log(f"{'='*60}")
+    log(f"Total files: {len(results)}")
+    log(f"Successful: {len(successful)}")
+    log(f"Failed: {len(results) - len(successful)}")
+    log(f"Total audio duration: {total_audio_duration/60:.1f} minutes ({total_audio_duration/3600:.2f} hours)")
+    log(f"Total experiment time: {total_experiment_time/60:.1f} minutes ({total_experiment_time/3600:.2f} hours)")
+    log(f"Speedup: {total_audio_duration/total_experiment_time:.2f}x realtime")
+    log(f"{'='*60}")
 
     # Upload artifacts to wandb
     wandb.save(str(hyp_path))
     wandb.save(str(results_path))
 
-    print("Inference complete!")
+    log("Inference complete!")
     return {"hyp_path": str(hyp_path), "results_path": str(results_path)}
