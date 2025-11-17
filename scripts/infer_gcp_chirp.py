@@ -6,6 +6,7 @@ Supports:
 - Fair comparison: same preprocessing as Whisper/Wav2Vec2 (pydub → mono 16kHz WAV)
 - Azure blob storage integration
 - Automatic endpoint selection based on model variant
+- Rate limiting: 150 requests/min quota (batched starts with delays)
 """
 import os
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tempfile import NamedTemporaryFile
+from functools import wraps
 
 # Audio processing
 from pydub import AudioSegment
@@ -26,6 +28,7 @@ from google.cloud import storage
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 from google.api_core.client_options import ClientOptions
+from google.api_core.exceptions import GoogleAPIError
 
 # Experiment tracking
 import wandb
@@ -35,6 +38,7 @@ _scripts_dir = Path(__file__).parent
 sys.path.insert(0, str(_scripts_dir))
 import azure_utils
 import data_loader
+from file_logger import log, init_logger
 
 
 def setup_gcp_clients(cfg):
@@ -58,12 +62,12 @@ def setup_gcp_clients(cfg):
         # Chirp 2: us-central1 only
         api_endpoint = "us-central1-speech.googleapis.com"
         recognizer_location = "us-central1"
-        print(f"Using Chirp 2 with endpoint: {api_endpoint}, location: {recognizer_location}")
+        log(f"Using Chirp 2 with endpoint: {api_endpoint}, location: {recognizer_location}")
     elif model_variant == "chirp_3":
         # Chirp 3: us multi-region
         api_endpoint = "us-speech.googleapis.com"
         recognizer_location = "us"
-        print(f"Using Chirp 3 with endpoint: {api_endpoint}, location: {recognizer_location}")
+        log(f"Using Chirp 3 with endpoint: {api_endpoint}, location: {recognizer_location}")
     else:
         raise ValueError(f"Unknown model_variant: {model_variant}. Use 'chirp', 'chirp_2', or 'chirp_3'")
 
@@ -337,8 +341,8 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
     # ===========================================================================
     # PHASE 1: Stream Upload to GCS (memory-safe: 1 file at a time)
     # ===========================================================================
-    print(f"\n[Streaming Upload] Processing {len(manifest_batch)} files...")
-    print(f"  Memory-safe: preprocessing max {max_concurrent_preprocessing} files concurrently")
+    log(f"\n[Streaming Upload] Processing {len(manifest_batch)} files...")
+    log(f"  Memory-safe: preprocessing max {max_concurrent_preprocessing} files concurrently")
 
     uploaded_files = []  # Track successfully uploaded files
     failed_files = []    # Track failed files
@@ -365,23 +369,23 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
                 else:
                     failed_files.append(result)
             except Exception as e:
-                print(f"  ✗ Error processing {item['collection_number']}: {e}")
+                log(f"  ✗ Error processing {item['collection_number']}: {e}")
                 failed_files.append({
                     'item': item,
                     'status': 'error',
                     'error_message': str(e)
                 })
 
-    print(f"  ✓ Uploaded: {len(uploaded_files)}/{len(manifest_batch)} files to GCS")
+    log(f"  ✓ Uploaded: {len(uploaded_files)}/{len(manifest_batch)} files to GCS")
 
     if not uploaded_files:
-        print("  ✗ No files successfully uploaded. Returning errors.")
+        log("  ✗ No files successfully uploaded. Returning errors.")
         return _build_error_results(failed_files, model_variant)
 
     # ===========================================================================
     # PHASE 2: Build File Metadata List (tiny memory - just URIs)
     # ===========================================================================
-    print(f"\n[Batch API] Creating file metadata for {len(uploaded_files)} files...")
+    log(f"\n[Batch API] Creating file metadata for {len(uploaded_files)} files...")
 
     file_metadata_list = []
     gcs_uri_to_file = {}  # Map GCS URI back to file info
@@ -392,14 +396,16 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
         file_metadata_list.append(file_metadata)
         gcs_uri_to_file[gcs_uri] = uf
 
-    print(f"  ✓ Created {len(file_metadata_list)} file metadata objects")
+    log(f"  ✓ Created {len(file_metadata_list)} file metadata objects")
 
     # ===========================================================================
-    # PHASE 3: Start transcriptions (send individual requests in parallel)
+    # PHASE 3: Start transcriptions with RATE LIMITING (150 requests/min quota)
     # ===========================================================================
-    # NOTE: GCP's inline_response_config only works with 1 file per request
-    # So we send individual requests but in parallel (non-blocking)
-    print(f"\n[Batch API] Starting {len(file_metadata_list)} transcription operations...")
+    # GCP quota: 150 BatchRecognize requests per minute
+    # Strategy: Submit in batches with delays between batches
+    log(f"\n[Batch API] Starting {len(file_metadata_list)} transcription operations...")
+    log(f"  GCP Quota: 150 requests/minute")
+    log(f"  Strategy: Submit in batches of 100, wait 60s between batches")
 
     config = cloud_speech.RecognitionConfig(
         auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
@@ -409,51 +415,75 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
 
     recognizer = f"projects/{project_id}/locations/{recognizer_location}/recognizers/_"
 
-    operations = []  # Store (operation, gcs_uri, file_info) tuples
+    operations = []  # Store (operation, file_info) tuples
 
-    # Start all operations in parallel (non-blocking)
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {}
+    # Rate limiting: submit in batches of 100 requests, wait 60 seconds between batches
+    RATE_LIMIT_BATCH_SIZE = 100  # Stay under 150/min quota
+    RATE_LIMIT_DELAY = 60  # seconds
 
-        for uf in uploaded_files:
-            gcs_uri = uf['gcs_uri']
+    for batch_idx in range(0, len(uploaded_files), RATE_LIMIT_BATCH_SIZE):
+        batch_files = uploaded_files[batch_idx:batch_idx + RATE_LIMIT_BATCH_SIZE]
+        batch_num = batch_idx // RATE_LIMIT_BATCH_SIZE + 1
+        total_rate_batches = (len(uploaded_files) + RATE_LIMIT_BATCH_SIZE - 1) // RATE_LIMIT_BATCH_SIZE
 
-            # Each file gets its own request (GCP limitation with inline response)
-            future = executor.submit(
-                start_transcription,
-                speech_client,
-                gcs_uri,
-                model_variant,
-                recognizer_location,
-                project_id,
-                language_code
-            )
-            futures[future] = uf
+        log(f"\n  [Rate Limit Batch {batch_num}/{total_rate_batches}] Starting {len(batch_files)} operations...")
 
-        # Collect operations as they start
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Starting operations"):
-            uf = futures[future]
-            try:
-                operation = future.result()
-                operations.append((operation, uf))
-            except Exception as e:
-                print(f"  ✗ Failed to start {uf['gcs_filename']}: {e}")
-                failed_files.append({
-                    'item': uf['item'],
-                    'status': 'error',
-                    'error_message': f"Failed to start: {str(e)}"
-                })
+        # Start operations for this batch in parallel
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {}
 
-    print(f"  ✓ Started {len(operations)}/{len(uploaded_files)} operations")
+            for uf in batch_files:
+                gcs_uri = uf['gcs_uri']
+
+                # Each file gets its own request (GCP limitation with inline response)
+                future = executor.submit(
+                    start_transcription,
+                    speech_client,
+                    gcs_uri,
+                    model_variant,
+                    recognizer_location,
+                    project_id,
+                    language_code
+                )
+                futures[future] = uf
+
+            # Collect operations as they start
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"  Batch {batch_num} submit"):
+                uf = futures[future]
+                try:
+                    operation = future.result()
+                    operations.append((operation, uf))
+                except Exception as e:
+                    error_msg = str(e)
+                    log(f"    ✗ Failed to start {uf['gcs_filename']}: {error_msg}")
+
+                    # Check if it's a rate limit error (429)
+                    if "429" in error_msg or "Quota exceeded" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                        log(f"    ⚠ RATE LIMIT HIT! Will retry in next batch.")
+
+                    failed_files.append({
+                        'item': uf['item'],
+                        'status': 'error',
+                        'error_message': f"Failed to start: {error_msg}"
+                    })
+
+        log(f"  ✓ Batch {batch_num}: Started {len([f for f in futures if not futures[f] in [ff['item'] for ff in failed_files]])} operations")
+
+        # Wait before next batch (unless this is the last batch)
+        if batch_idx + RATE_LIMIT_BATCH_SIZE < len(uploaded_files):
+            log(f"  ⏳ Waiting {RATE_LIMIT_DELAY}s before next batch (rate limiting)...")
+            time.sleep(RATE_LIMIT_DELAY)
+
+    log(f"\n  ✓ Total: Started {len(operations)}/{len(uploaded_files)} operations")
 
     # ===========================================================================
     # PHASE 4-5: Wait for operations and process results (with detailed logging)
     # ===========================================================================
-    print(f"\n[Transcription] Waiting for {len(operations)} operations to complete...")
-    print(f"  Timeout per file: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
-    print(f"  GCP Console: https://console.cloud.google.com/speech/locations/{recognizer_location}?project={project_id}")
-    print(f"\n  Starting to process operations at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  {'='*70}")
+    log(f"\n[Transcription] Waiting for {len(operations)} operations to complete...")
+    log(f"  Timeout per file: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
+    log(f"  GCP Console: https://console.cloud.google.com/speech/locations/{recognizer_location}?project={project_id}")
+    log(f"\n  Starting to process operations at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    log(f"  {'='*70}")
 
     batch_start = time.time()
     results = []
@@ -471,10 +501,10 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
         # Get operation name for logging
         operation_name = operation.operation.name if hasattr(operation, 'operation') else 'unknown'
 
-        print(f"\n  [{idx}/{len(operations)}] File: {collection_num} (ID: {file_id})")
-        print(f"      GCS URI: {gcs_uri}")
-        print(f"      Operation: {operation_name}")
-        print(f"      Started waiting at: {time.strftime('%H:%M:%S')}")
+        log(f"\n  [{idx}/{len(operations)}] File: {collection_num} (ID: {file_id})")
+        log(f"      GCS URI: {gcs_uri}")
+        log(f"      Operation: {operation_name}")
+        log(f"      Started waiting at: {time.strftime('%H:%M:%S')}")
 
         try:
             # Wait for this operation to complete
@@ -483,10 +513,10 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
             transcribe_time = time.time() - file_start
             completed_count += 1
 
-            print(f"      ✓ COMPLETED in {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
-            print(f"      Transcript length: {len(transcript)} chars")
-            print(f"      Audio duration: {uf['duration']:.1f}s")
-            print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(operations) - idx} remaining")
+            log(f"      ✓ COMPLETED in {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+            log(f"      Transcript length: {len(transcript)} chars")
+            log(f"      Audio duration: {uf['duration']:.1f}s")
+            log(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(operations) - idx} remaining")
 
             results.append({
                 'file_id': file_id,
@@ -504,9 +534,9 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
             transcribe_time = time.time() - file_start
             failed_count += 1
 
-            print(f"      ✗ FAILED after {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
-            print(f"      Error: {str(e)}")
-            print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(operations) - idx} remaining")
+            log(f"      ✗ FAILED after {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+            log(f"      Error: {str(e)}")
+            log(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(operations) - idx} remaining")
 
             results.append({
                 'file_id': file_id,
@@ -519,16 +549,16 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
 
     batch_time = time.time() - batch_start
 
-    print(f"\n  {'='*70}")
-    print(f"  Finished processing at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"\n[Results Summary]")
-    print(f"  Total operations: {len(operations)}")
-    print(f"  ✓ Completed: {completed_count}")
-    print(f"  ✗ Failed: {failed_count}")
-    print(f"  Total time: {batch_time:.1f}s ({batch_time/60:.1f} min, {batch_time/3600:.2f} hours)")
+    log(f"\n  {'='*70}")
+    log(f"  Finished processing at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    log(f"\n[Results Summary]")
+    log(f"  Total operations: {len(operations)}")
+    log(f"  ✓ Completed: {completed_count}")
+    log(f"  ✗ Failed: {failed_count}")
+    log(f"  Total time: {batch_time:.1f}s ({batch_time/60:.1f} min, {batch_time/3600:.2f} hours)")
     if completed_count > 0:
         avg_time = sum(r.get('processing_time_sec', 0) for r in results if r['status'] == 'success') / completed_count
-        print(f"  Avg time per file: {avg_time:.1f}s ({avg_time/60:.1f} min)")
+        log(f"  Avg time per file: {avg_time:.1f}s ({avg_time/60:.1f} min)")
 
     # Add failed files to results
     for ff in failed_files:
@@ -542,9 +572,9 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
         })
 
     # Cleanup GCS files
-    print(f"\n[Cleanup] Deleting {len(uploaded_files)} files from GCS...")
+    log(f"\n[Cleanup] Deleting {len(uploaded_files)} files from GCS...")
     _cleanup_gcs_files(bucket, [uf['gcs_filename'] for uf in uploaded_files], upload_workers)
-    print(f"  ✓ Cleanup complete")
+    log(f"  ✓ Cleanup complete")
 
     return results
 
@@ -557,14 +587,19 @@ def run(cfg):
     - Batch processing with parallel upload/transcribe/delete
     - Azure blob storage
     - Fair comparison (same preprocessing as Whisper/Wav2Vec2)
+    - Rate limiting (150 requests/min quota)
+    - File logging (timestamped logs saved to output directory)
     """
     experiment_start_time = time.time()
 
     out_dir = Path(cfg["output"]["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize file logger FIRST (before any log() calls)
+    init_logger(out_dir, prefix="gcp_chirp")
+
     # Setup GCP clients
-    print("Setting up GCP clients...")
+    log("Setting up GCP clients...")
     storage_client, speech_client, recognizer_location = setup_gcp_clients(cfg)
 
     # Prepare file manifest
@@ -577,7 +612,7 @@ def run(cfg):
 
         df = data_loader.load_vhp_dataset(parquet_path, sample_size=sample_size)
         manifest = data_loader.prepare_inference_manifest(df, blob_prefix=blob_prefix)
-        print(f"Prepared manifest with {len(manifest)} items from Azure blob")
+        log(f"Prepared manifest with {len(manifest)} items from Azure blob")
     else:
         raise ValueError(f"Source type '{source_type}' not supported for GCP Chirp. Use 'azure_blob'.")
 
@@ -585,16 +620,16 @@ def run(cfg):
     batch_size = cfg["model"]["gcp"].get("batch_size", 100)
     all_results = []
 
-    print(f"\nProcessing {len(manifest)} files in batches of {batch_size}...")
+    log(f"\nProcessing {len(manifest)} files in batches of {batch_size}...")
 
     for i in range(0, len(manifest), batch_size):
         batch = manifest[i:i + batch_size]
         batch_num = i // batch_size + 1
         total_batches = (len(manifest) + batch_size - 1) // batch_size
 
-        print(f"\n{'='*60}")
-        print(f"BATCH {batch_num}/{total_batches} ({len(batch)} files)")
-        print(f"{'='*60}")
+        log(f"\n{'='*60}")
+        log(f"BATCH {batch_num}/{total_batches} ({len(batch)} files)")
+        log(f"{'='*60}")
 
         batch_results = process_batch_gcp_streaming(
             batch,
@@ -607,15 +642,15 @@ def run(cfg):
         all_results.extend(batch_results)
 
     # Save results
-    print(f"\n{'='*60}")
-    print(f"SAVING RESULTS")
-    print(f"{'='*60}")
+    log(f"\n{'='*60}")
+    log(f"SAVING RESULTS")
+    log(f"{'='*60}")
 
     # Save per-file results to parquet
     df_results = pd.DataFrame(all_results)
     parquet_path = out_dir / "inference_results.parquet"
     df_results.to_parquet(parquet_path, index=False)
-    print(f"✓ Saved per-file results: {parquet_path}")
+    log(f"✓ Saved per-file results: {parquet_path}")
 
     # Save individual hypothesis files (if enabled)
     if cfg["output"].get("save_per_file", False):
@@ -625,7 +660,7 @@ def run(cfg):
                 per_file_path = out_dir / f"hyp_{file_id}.txt"
                 with open(per_file_path, "w") as f:
                     f.write(result['hypothesis'])
-        print(f"✓ Saved individual hypothesis files for {sum(1 for r in all_results if r['status'] == 'success')} successful transcriptions")
+        log(f"✓ Saved individual hypothesis files for {sum(1 for r in all_results if r['status'] == 'success')} successful transcriptions")
 
     # Save hypothesis text file (for legacy compatibility)
     model_variant = cfg["model"]["model_variant"]
@@ -638,24 +673,24 @@ def run(cfg):
             else:
                 hout.write("[ERROR]\n")
 
-    print(f"✓ Saved hypothesis text: {hyp_path}")
+    log(f"✓ Saved hypothesis text: {hyp_path}")
 
     # Summary
     total_time = time.time() - experiment_start_time
     successful = sum(1 for r in all_results if r['status'] == 'success')
     failed = len(all_results) - successful
 
-    print(f"\n{'='*60}")
-    print(f"EXPERIMENT COMPLETE")
-    print(f"{'='*60}")
-    print(f"Total files: {len(all_results)}")
-    print(f"Successful: {successful}")
-    print(f"Failed: {failed}")
-    print(f"Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
+    log(f"\n{'='*60}")
+    log(f"EXPERIMENT COMPLETE")
+    log(f"{'='*60}")
+    log(f"Total files: {len(all_results)}")
+    log(f"Successful: {successful}")
+    log(f"Failed: {failed}")
+    log(f"Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
 
     if successful > 0:
         avg_time = sum(r.get('processing_time_sec', 0) for r in all_results if r['status'] == 'success') / successful
-        print(f"Avg processing time: {avg_time:.1f}s per file")
+        log(f"Avg processing time: {avg_time:.1f}s per file")
 
     # Log to wandb
     wandb.log({
