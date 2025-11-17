@@ -1,0 +1,35 @@
+experiment_id: test-aws-transcribe-sample5-vhp-pre2010
+
+model:
+  name: "aws_transcribe"
+  aws:
+    credentials_path: "credentials/creds.env"  # Path to .env file with AWS credentials
+    region: "us-east-2"  # Update to your preferred region
+    temp_bucket: "amia2025-test-bucket"  # Update to your S3 bucket name
+    max_concurrent_preprocessing: 3   # Memory-safe: only 3 files at a time (large VHP files ~50-100MB each)
+    upload_workers: 30                # S3 upload parallelism for cleanup
+    batch_size: 1000                  # Process all files in one batch (AWS handles queueing)
+    language_code: "en-US"
+    upload_timeout: 600               # 10 minutes
+    transcribe_timeout: 14400         # 4 hours (AWS max duration limit)
+    poll_interval: 10                 # Poll every 10 seconds
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 5
+  duration_sec: null  # No duration limit (but AWS has 4hr max anyway)
+  sample_rate: 16000
+
+output:
+  dir: "outputs/test-aws-transcribe-sample5-vhp-pre2010"
+  save_per_file: true
+
+evaluation:
+  use_whisper_normalizer: true
+
+wandb:
+  project: amia-stt
+  group: test-commercial-api
+  tags: ["aws-transcribe", "test", "sample5", "commercial-api"]

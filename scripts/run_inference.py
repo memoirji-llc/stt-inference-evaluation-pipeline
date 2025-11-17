@@ -33,6 +33,9 @@ def main():
     elif "gcp_chirp" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_gcp_chirp as mod
+    elif "aws_transcribe" in cfg["model"]["name"]:
+        sys.path.insert(0, str(scripts_dir))
+        import infer_aws_transcribe as mod
     else:
         raise ValueError(f"Unknown model: {cfg['model']}")
 

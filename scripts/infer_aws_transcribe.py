@@ -1,0 +1,734 @@
+"""
+AWS Transcribe inference module.
+
+Supports:
+- Batch processing with parallel upload/transcribe/delete
+- Fair comparison: same preprocessing as Whisper/Wav2Vec2/GCP (pydub → mono 16kHz WAV)
+- Azure blob storage integration
+- AWS automatic job queueing (up to 100 concurrent jobs)
+"""
+import os
+import sys
+import io
+import time
+import urllib.request
+import json
+from pathlib import Path
+from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Audio processing
+from pydub import AudioSegment
+import pandas as pd
+from tqdm import tqdm
+
+# AWS clients
+import boto3
+from botocore.exceptions import ClientError
+
+# Experiment tracking
+import wandb
+
+# Import local modules
+_scripts_dir = Path(__file__).parent
+sys.path.insert(0, str(_scripts_dir))
+import azure_utils
+import data_loader
+
+
+def setup_aws_clients(cfg):
+    """
+    Initialize AWS S3 and Transcribe clients.
+
+    If credentials_path is specified in config, load from that .env file.
+    Otherwise, boto3 will use default credential chain (environment vars, ~/.aws/credentials, IAM role).
+
+    Returns:
+        (s3_client, transcribe_client, region)
+    """
+    region = cfg["model"]["aws"]["region"]
+
+    # Optional: Load credentials from .env file if specified in config
+    # This allows running without manual export, similar to GCP
+    credentials_path = cfg["model"]["aws"].get("credentials_path")
+    if credentials_path:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=credentials_path)
+        print(f"Loaded credentials from: {credentials_path}")
+
+    # Get credentials from environment (either loaded above or already set)
+    aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+    # Create clients with explicit credentials (same pattern as notebook)
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        region_name=region
+    )
+
+    transcribe_client = boto3.client(
+        'transcribe',
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        region_name=region
+    )
+
+    print(f"AWS clients initialized (region: {region})")
+    return s3_client, transcribe_client, region
+
+
+def prepare_audio_for_aws(audio_bytes, duration_sec=None, sample_rate=16000):
+    """
+    Preprocess audio EXACTLY like Whisper/Wav2Vec2/GCP pipeline for fair comparison.
+
+    Args:
+        audio_bytes: Raw audio bytes (MP3/MP4/WAV/etc.)
+        duration_sec: Optional duration limit (seconds)
+        sample_rate: Target sample rate (default: 16000)
+
+    Returns:
+        (wav_bytes, actual_duration_sec)
+    """
+    # Load with pydub (handles MP3, MP4, M4A, WAV, etc.)
+    audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+
+    # Normalize: EXACT same as infer_whisper.py and infer_gcp_chirp.py
+    audio_segment = audio_segment.set_channels(1)  # Mono
+    audio_segment = audio_segment.set_frame_rate(sample_rate)  # 16kHz
+
+    # Trim to desired duration if specified (SAME as Whisper/GCP)
+    if duration_sec is not None:
+        duration_ms = duration_sec * 1000
+        audio_segment = audio_segment[:duration_ms]
+
+    # Export to WAV bytes (in-memory, no disk write)
+    wav_buffer = io.BytesIO()
+    audio_segment.export(wav_buffer, format="wav")
+    wav_bytes = wav_buffer.getvalue()
+
+    actual_duration = len(audio_segment) / 1000.0  # pydub uses milliseconds
+
+    return wav_bytes, actual_duration
+
+
+def download_and_preprocess(item, duration_sec, sample_rate=16000):
+    """
+    Download from Azure and preprocess to WAV (SAME as Whisper/GCP pipeline).
+
+    Returns:
+        (wav_bytes, actual_duration, successful_path) or raises exception
+    """
+    # Handle both old format (single blob_path) and new format (blob_path_candidates list)
+    if "blob_path_candidates" in item:
+        source_paths = item["blob_path_candidates"]
+    elif "blob_path" in item:
+        source_paths = [item["blob_path"]]
+    else:
+        raise ValueError("No blob path found in manifest")
+
+    # Try each candidate path
+    audio_bytes = None
+    successful_path = None
+
+    for blob_path in source_paths:
+        try:
+            audio_bytes = azure_utils.download_blob_to_memory(blob_path)
+            successful_path = blob_path
+            break
+        except Exception:
+            continue
+
+    if audio_bytes is None:
+        raise FileNotFoundError(f"None of the candidate paths exist: {source_paths}")
+
+    # Check file size
+    if len(audio_bytes) < 100:
+        raise ValueError(f"File too small ({len(audio_bytes)} bytes) - likely empty or corrupted")
+
+    # Preprocess EXACTLY like Whisper/GCP
+    wav_bytes, actual_duration = prepare_audio_for_aws(audio_bytes, duration_sec, sample_rate)
+
+    return wav_bytes, actual_duration, successful_path
+
+
+def upload_to_s3(s3_client, bucket, key, wav_bytes, timeout=600):
+    """Upload WAV bytes to S3 bucket.
+
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        key: Object key (path in bucket)
+        wav_bytes: WAV file bytes to upload
+        timeout: Upload timeout in seconds (default: 600 = 10 minutes)
+    """
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=wav_bytes,
+        ContentType='audio/wav'
+    )
+
+
+def delete_from_s3(s3_client, bucket, key):
+    """Delete file from S3 bucket."""
+    s3_client.delete_object(Bucket=bucket, Key=key)
+
+
+def delete_transcription_job(transcribe_client, job_name):
+    """Delete transcription job after completion."""
+    try:
+        transcribe_client.delete_transcription_job(TranscriptionJobName=job_name)
+    except Exception as e:
+        # Non-critical - job will auto-expire
+        pass
+
+
+def _preprocess_and_upload_one(item, s3_client, bucket, duration_sec, sample_rate, bucket_name):
+    """
+    Download, preprocess, and upload ONE file to S3 atomically.
+    This function processes one file at a time to minimize memory usage.
+
+    Returns dict with status and file info.
+    """
+    try:
+        # Download and preprocess
+        wav_bytes, duration, successful_path = download_and_preprocess(item, duration_sec, sample_rate)
+
+        # Check AWS limits BEFORE uploading
+        # AWS Transcribe limits: 4 hours OR 2 GB (whichever comes first)
+        if duration > 14400:  # 4 hours = 14400 seconds
+            return {
+                'status': 'error',
+                'item': item,
+                'error_message': f'Audio duration {duration:.1f}s exceeds AWS 4-hour limit'
+            }
+
+        if len(wav_bytes) > 2 * 1024**3:  # 2 GB
+            return {
+                'status': 'error',
+                'item': item,
+                'error_message': f'File size {len(wav_bytes)/1024**3:.2f}GB exceeds AWS 2GB limit'
+            }
+
+        # Upload to S3
+        # s3 key should align with az blob path of the media file
+        ori_path = Path(successful_path)
+        ori_path_wav = str(ori_path.with_suffix(".wav"))
+        s3_key = str(ori_path_wav)
+        upload_to_s3(s3_client, bucket, s3_key, wav_bytes)
+
+        # Immediately free memory
+        del wav_bytes
+
+        # Return success with metadata
+        return {
+            'status': 'success',
+            'item': item,
+            's3_key': s3_key,
+            's3_uri': f"s3://{bucket_name}/{s3_key}",
+            'duration': duration,
+            'successful_path': successful_path
+        }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'item': item,
+            'error_message': str(e)
+        }
+
+
+def _cleanup_s3_files(s3_client, bucket, s3_keys, workers=30):
+    """Delete multiple files from S3 in parallel."""
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        delete_futures = []
+        for key in s3_keys:
+            future = executor.submit(delete_from_s3, s3_client, bucket, key)
+            delete_futures.append(future)
+
+        for future in as_completed(delete_futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"  ⚠ Delete warning: {e}")
+
+
+def _cleanup_transcription_jobs(transcribe_client, job_names, workers=30):
+    """Delete multiple transcription jobs in parallel."""
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        delete_futures = []
+        for job_name in job_names:
+            future = executor.submit(delete_transcription_job, transcribe_client, job_name)
+            delete_futures.append(future)
+
+        for future in as_completed(delete_futures):
+            try:
+                future.result()
+            except Exception:
+                pass  # Non-critical
+
+
+def start_transcription_job(transcribe_client, job_name, s3_uri, language_code, region):
+    """
+    Start a transcription job for one file.
+
+    Args:
+        transcribe_client: boto3 Transcribe client
+        job_name: Unique job name
+        s3_uri: S3 URI (s3://bucket/key.wav)
+        language_code: Language code (e.g., 'en-US')
+        region: AWS region
+
+    Returns:
+        job_name (for polling)
+    """
+    transcribe_client.start_transcription_job(
+        TranscriptionJobName=job_name,
+        Media={'MediaFileUri': s3_uri},
+        LanguageCode=language_code
+    )
+    return job_name
+
+
+def poll_job_status(transcribe_client, job_name, timeout=14400, poll_interval=10):
+    """
+    Poll job until COMPLETED or FAILED.
+
+    Args:
+        transcribe_client: boto3 Transcribe client
+        job_name: Job name to poll
+        timeout: Max time to wait (default: 4 hours)
+        poll_interval: Time between polls in seconds
+
+    Returns:
+        (status, transcript_or_error)
+        status: 'success' or 'error'
+        transcript_or_error: transcript text if success, error message if error
+    """
+    start_time = time.time()
+
+    while True:
+        # Check timeout
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            return ('error', f'Timeout after {timeout}s')
+
+        # Get job status
+        try:
+            response = transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
+            job = response['TranscriptionJob']
+            status = job['TranscriptionJobStatus']
+
+            if status == 'COMPLETED':
+                # Fetch transcript from URI
+                transcript_uri = job['Transcript']['TranscriptFileUri']
+                with urllib.request.urlopen(transcript_uri) as r:
+                    data = json.loads(r.read())
+                transcript = data['results']['transcripts'][0]['transcript']
+                return ('success', transcript)
+
+            elif status == 'FAILED':
+                error = job.get('FailureReason', 'Unknown error')
+                return ('error', f'Job failed: {error}')
+
+            # Still in progress
+            time.sleep(poll_interval)
+
+        except Exception as e:
+            return ('error', f'Polling error: {str(e)}')
+
+
+def process_batch_aws_streaming(manifest_batch, s3_client, transcribe_client, cfg, region):
+    """
+    Process files using AWS Transcribe batch API.
+
+    Pipeline:
+    1. Stream upload to S3 (1 file at a time - memory safe)
+    2. Start transcription jobs (let AWS handle queueing beyond 100 concurrent)
+    3. Poll each job until complete (sequential with detailed logging)
+    4. Process results and cleanup (delete S3 files + jobs)
+
+    This approach:
+    - Uses minimal VM memory (only 1 file preprocessed at a time)
+    - Leverages AWS automatic job queueing (up to 100 concurrent)
+    - Provides detailed per-job logging for visibility
+
+    Args:
+        manifest_batch: List of file items to process
+        s3_client: boto3 S3 client
+        transcribe_client: boto3 Transcribe client
+        cfg: Config dict
+        region: AWS region
+
+    Returns:
+        List of result dictionaries
+    """
+    bucket_name = cfg["model"]["aws"]["temp_bucket"]
+
+    duration_sec = cfg["input"].get("duration_sec")
+    sample_rate = cfg["input"].get("sample_rate", 16000)
+    language_code = cfg["model"]["aws"].get("language_code", "en-US")
+
+    upload_timeout = cfg["model"]["aws"].get("upload_timeout", 600)
+    transcribe_timeout = cfg["model"]["aws"].get("transcribe_timeout", 14400)  # 4 hours default
+    poll_interval = cfg["model"]["aws"].get("poll_interval", 10)
+    max_concurrent_preprocessing = cfg["model"]["aws"].get("max_concurrent_preprocessing", 3)
+
+    # ===========================================================================
+    # PHASE 1: Stream Upload to S3 (memory-safe: max N files at a time)
+    # ===========================================================================
+    print(f"\n[Streaming Upload] Processing {len(manifest_batch)} files...")
+    print(f"  Memory-safe: preprocessing max {max_concurrent_preprocessing} files concurrently")
+
+    uploaded_files = []  # Track successfully uploaded files
+    failed_files = []    # Track failed files
+
+    # Use limited parallelism for preprocessing+upload
+    with ThreadPoolExecutor(max_workers=max_concurrent_preprocessing) as executor:
+        futures = {}
+
+        for item in manifest_batch:
+            # Submit download+preprocess+upload as one atomic operation
+            future = executor.submit(
+                _preprocess_and_upload_one,
+                item, s3_client, bucket_name, duration_sec, sample_rate, bucket_name
+            )
+            futures[future] = item
+
+        # Collect results as they complete
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Upload to S3"):
+            item = futures[future]
+            
+            try:
+                result = future.result()
+                if result['status'] == 'success':
+                    uploaded_files.append(result)
+                else:
+                    failed_files.append(result)
+                    print(f"  ⚠ Skipped {item['collection_number']}: {result['error_message']}")
+            except Exception as e:
+                print(f"  ✗ Error processing {item['collection_number']}: {e}")
+                failed_files.append({
+                    'item': item,
+                    'status': 'error',
+                    'error_message': str(e)
+                })
+
+    print(f"  ✓ Uploaded: {len(uploaded_files)}/{len(manifest_batch)} files to S3")
+
+    if not uploaded_files:
+        print("  ✗ No files successfully uploaded. Returning errors.")
+        return _build_error_results(failed_files)
+
+    # ===========================================================================
+    # PHASE 2: Start transcription jobs (submit all, let AWS queue)
+    # ===========================================================================
+    print(f"\n[Job Submission] Starting {len(uploaded_files)} transcription jobs...")
+    print(f"  AWS Concurrent Limit: 100 jobs (beyond this, AWS auto-queues in FIFO)")
+
+    jobs = []  # Store (job_name, file_info) tuples
+
+    # Start all jobs in parallel (AWS will queue beyond 100)
+    timestamp = int(time.time())
+
+    for idx, uf in enumerate(uploaded_files, start=1):
+        s3_uri = uf['s3_uri']
+        collection_num = uf['item']['collection_number']
+        file_id = uf['item']['file_id']
+
+        # Create unique job name: collection_number_timestamp_fileid
+        # AWS only allows [0-9a-zA-Z._-], so replace slashes with underscores
+        safe_collection_num = collection_num.replace('/', '_')
+        job_name = f"{safe_collection_num}_{timestamp}_{file_id}"
+
+        try:
+            start_transcription_job(
+                transcribe_client,
+                job_name,
+                s3_uri,
+                language_code,
+                region
+            )
+            jobs.append((job_name, uf))
+
+            if idx <= 5 or idx % 50 == 0:  # Log first 5 and every 50th
+                print(f"  [{idx}/{len(uploaded_files)}] Submitted: {collection_num}")
+                print(f"      Job Name: {job_name}")
+                print(f"      S3 URI: {s3_uri}")
+
+        except Exception as e:
+            print(f"  ✗ Failed to start {collection_num}: {e}")
+            failed_files.append({
+                'item': uf['item'],
+                'status': 'error',
+                'error_message': f"Failed to start job: {str(e)}"
+            })
+
+    print(f"  ✓ Started {len(jobs)}/{len(uploaded_files)} jobs")
+
+    # ===========================================================================
+    # PHASE 3: Poll jobs with detailed logging
+    # ===========================================================================
+    print(f"\n[Transcription] Polling {len(jobs)} jobs...")
+    print(f"  Timeout per job: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
+    print(f"  Poll interval: {poll_interval}s")
+    print(f"  AWS Console: https://{region}.console.aws.amazon.com/transcribe/home?region={region}#jobs")
+    print(f"\n  Starting to poll at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  {'='*70}")
+
+    batch_start = time.time()
+    results = []
+
+    # Track statistics
+    completed_count = 0
+    failed_count = 0
+
+    for idx, (job_name, uf) in enumerate(jobs, start=1):
+        file_start = time.time()
+        collection_num = uf['item']['collection_number']
+        file_id = uf['item']['file_id']
+        s3_uri = uf['s3_uri']
+
+        print(f"\n  [{idx}/{len(jobs)}] File: {collection_num} (ID: {file_id})")
+        print(f"      Job Name: {job_name}")
+        print(f"      S3 URI: {s3_uri}")
+        print(f"      Started polling at: {time.strftime('%H:%M:%S')}")
+
+        try:
+            # Poll until complete
+            status, result = poll_job_status(transcribe_client, job_name, transcribe_timeout, poll_interval)
+            transcribe_time = time.time() - file_start
+
+            if status == 'success':
+                completed_count += 1
+                transcript = result
+
+                print(f"      ✓ COMPLETED in {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+                print(f"      Transcript length: {len(transcript)} chars")
+                print(f"      Audio duration: {uf['duration']:.1f}s")
+                print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(jobs) - idx} remaining")
+
+                results.append({
+                    'file_id': file_id,
+                    'collection_number': collection_num,
+                    'hypothesis': transcript,
+                    'duration_sec': uf['duration'],
+                    'processing_time_sec': transcribe_time,
+                    'model_name': 'aws-transcribe',
+                    'status': 'success',
+                    'ground_truth': uf['item'].get('ground_truth'),
+                    'title': uf['item'].get('title', ''),
+                    'blob_path': uf['successful_path']
+                })
+            else:
+                failed_count += 1
+                error_msg = result
+
+                print(f"      ✗ FAILED after {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+                print(f"      Error: {error_msg}")
+                print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(jobs) - idx} remaining")
+
+                results.append({
+                    'file_id': file_id,
+                    'collection_number': collection_num,
+                    'hypothesis': '',
+                    'status': 'error',
+                    'error_message': error_msg,
+                    'model_name': 'aws-transcribe'
+                })
+
+        except Exception as e:
+            transcribe_time = time.time() - file_start
+            failed_count += 1
+
+            print(f"      ✗ EXCEPTION after {transcribe_time:.1f}s ({transcribe_time/60:.1f} min)")
+            print(f"      Error: {str(e)}")
+            print(f"      Status: {completed_count} ✓ completed | {failed_count} ✗ failed | {len(jobs) - idx} remaining")
+
+            results.append({
+                'file_id': file_id,
+                'collection_number': collection_num,
+                'hypothesis': '',
+                'status': 'error',
+                'error_message': f'Exception: {str(e)}',
+                'model_name': 'aws-transcribe'
+            })
+
+    batch_time = time.time() - batch_start
+
+    print(f"\n  {'='*70}")
+    print(f"  Finished polling at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n[Results Summary]")
+    print(f"  Total jobs: {len(jobs)}")
+    print(f"  ✓ Completed: {completed_count}")
+    print(f"  ✗ Failed: {failed_count}")
+    print(f"  Total time: {batch_time:.1f}s ({batch_time/60:.1f} min, {batch_time/3600:.2f} hours)")
+    if completed_count > 0:
+        avg_time = sum(r.get('processing_time_sec', 0) for r in results if r['status'] == 'success') / completed_count
+        print(f"  Avg time per file: {avg_time:.1f}s ({avg_time/60:.1f} min)")
+
+    # Add failed files to results
+    for ff in failed_files:
+        results.append({
+            'file_id': ff['item']['file_id'],
+            'collection_number': ff['item']['collection_number'],
+            'hypothesis': '',
+            'status': 'error',
+            'error_message': ff.get('error_message', 'Unknown error'),
+            'model_name': 'aws-transcribe'
+        })
+
+    # ===========================================================================
+    # PHASE 4: Cleanup (delete S3 files + transcription jobs)
+    # ===========================================================================
+    print(f"\n[Cleanup] Deleting {len(uploaded_files)} S3 files and {len(jobs)} transcription jobs...")
+
+    # Delete S3 files
+    _cleanup_s3_files(s3_client, bucket_name, [uf['s3_key'] for uf in uploaded_files])
+
+    # Delete transcription jobs
+    _cleanup_transcription_jobs(transcribe_client, [job_name for job_name, _ in jobs])
+
+    print(f"  ✓ Cleanup complete")
+
+    return results
+
+
+def _build_error_results(files_list):
+    """Build error results for failed files."""
+    results = []
+    for f in files_list:
+        item = f.get('item', {})
+        results.append({
+            'file_id': item.get('file_id', -1),
+            'collection_number': item.get('collection_number', 'unknown'),
+            'hypothesis': '',
+            'status': 'error',
+            'error_message': f.get('error_message', 'Unknown error'),
+            'model_name': 'aws-transcribe'
+        })
+    return results
+
+
+def run(cfg):
+    """
+    Run AWS Transcribe inference on dataset from config.
+
+    Supports:
+    - Batch processing with parallel upload/transcribe/delete
+    - Azure blob storage
+    - Fair comparison (same preprocessing as Whisper/Wav2Vec2/GCP)
+    """
+    experiment_start_time = time.time()
+
+    out_dir = Path(cfg["output"]["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup AWS clients
+    print("Setting up AWS clients...")
+    s3_client, transcribe_client, region = setup_aws_clients(cfg)
+
+    # Prepare file manifest
+    source_type = cfg["input"].get("source", "azure_blob")
+
+    if source_type == "azure_blob":
+        parquet_path = cfg["input"]["parquet_path"]
+        sample_size = cfg["input"].get("sample_size")
+        blob_prefix = cfg["input"].get("blob_prefix", "loc_vhp")
+
+        df = data_loader.load_vhp_dataset(parquet_path, sample_size=sample_size)
+        manifest = data_loader.prepare_inference_manifest(df, blob_prefix=blob_prefix)
+        print(f"Prepared manifest with {len(manifest)} items from Azure blob")
+    else:
+        raise ValueError(f"Source type '{source_type}' not supported for AWS Transcribe. Use 'azure_blob'.")
+
+    # Process in batches (for code consistency, but AWS handles queueing)
+    batch_size = cfg["model"]["aws"].get("batch_size", 1000)
+    all_results = []
+
+    print(f"\nProcessing {len(manifest)} files in batches of {batch_size}...")
+
+    for i in range(0, len(manifest), batch_size):
+        batch = manifest[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(manifest) + batch_size - 1) // batch_size
+
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_num}/{total_batches} ({len(batch)} files)")
+        print(f"{'='*60}")
+
+        batch_results = process_batch_aws_streaming(
+            batch,
+            s3_client,
+            transcribe_client,
+            cfg,
+            region
+        )
+
+        all_results.extend(batch_results)
+
+    # Save results
+    print(f"\n{'='*60}")
+    print(f"SAVING RESULTS")
+    print(f"{'='*60}")
+
+    # Save per-file results to parquet
+    df_results = pd.DataFrame(all_results)
+    parquet_path = out_dir / "inference_results.parquet"
+    df_results.to_parquet(parquet_path, index=False)
+    print(f"✓ Saved per-file results: {parquet_path}")
+
+    # Save individual hypothesis files (if enabled)
+    if cfg["output"].get("save_per_file", False):
+        for result in all_results:
+            if result['status'] == 'success':
+                file_id = result['file_id']
+                per_file_path = out_dir / f"hyp_{file_id}.txt"
+                with open(per_file_path, "w") as f:
+                    f.write(result['hypothesis'])
+        print(f"✓ Saved individual hypothesis files for {sum(1 for r in all_results if r['status'] == 'success')} successful transcriptions")
+
+    # Save hypothesis text file (for legacy compatibility)
+    hyp_path = out_dir / "hyp_aws_transcribe.txt"
+
+    with open(hyp_path, "w") as hout:
+        for result in all_results:
+            if result['status'] == 'success':
+                hout.write(result['hypothesis'] + "\n")
+            else:
+                hout.write("[ERROR]\n")
+
+    print(f"✓ Saved hypothesis text: {hyp_path}")
+
+    # Summary
+    total_time = time.time() - experiment_start_time
+    successful = sum(1 for r in all_results if r['status'] == 'success')
+    failed = len(all_results) - successful
+
+    print(f"\n{'='*60}")
+    print(f"EXPERIMENT COMPLETE")
+    print(f"{'='*60}")
+    print(f"Total files: {len(all_results)}")
+    print(f"Successful: {successful}")
+    print(f"Failed: {failed}")
+    print(f"Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
+
+    if successful > 0:
+        avg_time = sum(r.get('processing_time_sec', 0) for r in all_results if r['status'] == 'success') / successful
+        print(f"Avg processing time: {avg_time:.1f}s per file")
+
+    # Log to wandb
+    wandb.log({
+        "total_files": len(all_results),
+        "successful_files": successful,
+        "failed_files": failed,
+        "total_time_sec": total_time,
+        "status": "inference_done"
+    })
+
+    return {
+        "inference_results_parquet": str(parquet_path),
+        "hypothesis_text": str(hyp_path)
+    }
