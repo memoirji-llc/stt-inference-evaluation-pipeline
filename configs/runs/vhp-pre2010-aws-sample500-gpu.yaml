@@ -1,0 +1,43 @@
+# Experiment: AWS Transcribe, 500-sample pre-2010 files (for commercial API comparison)
+# Deterministic sampling with random_state=42 (same seed as Chirp 2 and Chirp 3 configs)
+# This will only generate transcripts (inference_results.parquet + hypothesis files)
+
+experiment_id: vhp-pre2010-aws-sample500-gpu
+
+model:
+  name: "aws_transcribe"
+  aws:
+    credentials_path: "credentials/creds.env"  # Path to .env file with AWS credentials
+    region: "us-east-2"
+    temp_bucket: "amia2025-test-bucket"  # Update to your S3 bucket name
+
+    # Parallelization settings
+    max_concurrent_preprocessing: 3   # Only 3 files at a time (avoid OOM)
+    upload_workers: 30                # S3 upload parallelism for cleanup
+    batch_size: 1000                  # Process all 500 in one batch (AWS handles queueing)
+
+    # API settings
+    language_code: "en-US"
+    upload_timeout: 600               # 10 minutes
+    transcribe_timeout: 14400         # 4 hours (AWS max duration limit)
+    poll_interval: 10                 # Poll every 10 seconds
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 500  # 500 samples with random_state=42 (deterministic)
+  duration_sec: null  # Full audio
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-pre2010-aws-sample500-gpu"
+  save_per_file: true
+
+evaluation:
+  use_whisper_normalizer: true
+
+wandb:
+  project: amia-stt
+  group: experiments-commercial-api-500sample
+  tags: ["aws-transcribe", "pre2010", "sample500", "full-duration", "commercial-api", "inference-only"]

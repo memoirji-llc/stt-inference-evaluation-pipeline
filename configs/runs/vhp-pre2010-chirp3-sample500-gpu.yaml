@@ -1,0 +1,46 @@
+# Experiment: GCP Chirp 3, 500-sample pre-2010 files (for commercial API comparison)
+# Deterministic sampling with random_state=42 (same seed as Chirp 2 and AWS Transcribe configs)
+# This will only generate transcripts (inference_results.parquet + hypothesis files)
+
+experiment_id: vhp-pre2010-chirp3-sample500-gpu
+
+model:
+  name: "gcp_chirp"
+  model_variant: "chirp_3"  # Chirp 3 (latest model)
+
+  # GCP-specific settings
+  gcp:
+    project_id: "memoirji-amia-2025"
+    credentials_path: "credentials/gcloud/application_default_credentials.json"
+    temp_bucket: "memoirji-amia-2025-temp"
+
+    # Parallelization settings
+    max_concurrent_preprocessing: 3   # Only 3 files at a time (avoid OOM)
+    upload_workers: 30                # Upload after preprocessing (network-bound)
+    transcribe_workers: 20            # Start 20 transcription operations concurrently
+    batch_size: 1000                  # Process all 500 in one batch
+
+    # API settings
+    language_code: "en-US"
+    upload_timeout: 600  # 10 minutes
+    transcribe_timeout: 14400  # 4 hours
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 500  # 500 samples with random_state=42 (deterministic)
+  duration_sec: null  # Full audio
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-pre2010-chirp3-sample500-gpu"
+  save_per_file: true
+
+# NOTE: No evaluation section - run inference only
+# To evaluate later, use: uv run python scripts/evaluate.py --config <this-file> --inference_results <output>/inference_results.parquet --parquet <path-to-parquet>
+
+wandb:
+  project: amia-stt
+  group: experiments-commercial-api-500sample
+  tags: ["gcp-chirp3", "pre2010", "sample500", "full-duration", "commercial-api", "inference-only"]
