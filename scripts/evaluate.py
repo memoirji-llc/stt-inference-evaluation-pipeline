@@ -1,5 +1,10 @@
 import argparse, yaml, jiwer, wandb, re
 from pathlib import Path
+import sys
+from pathlib import Path as P
+_scripts_dir = P(__file__).parent
+sys.path.insert(0, str(_scripts_dir))
+from file_logger import log, init_logger
 import pandas as pd
 from bs4 import BeautifulSoup
 
@@ -32,8 +37,8 @@ def normalize(s, use_whisper_normalizer=False):
             normalizer = EnglishTextNormalizer()
             return normalizer(s)
         except ImportError:
-            print("WARNING: whisper not installed. Falling back to jiwer normalization.")
-            print("Install with: pip install openai-whisper")
+            log("WARNING: whisper not installed. Falling back to jiwer normalization.")
+            log("Install with: pip install openai-whisper")
             use_whisper_normalizer = False
 
     # Standard jiwer normalization (default)
@@ -114,7 +119,7 @@ def main():
         # Legacy single-file workflow
         evaluate_legacy_workflow(args)
     else:
-        print("ERROR: Must provide either (--inference_results + --parquet) OR (--hyp + --ref)")
+        log("ERROR: Must provide either (--inference_results + --parquet) OR (--hyp + --ref)")
         return 1
 
 
@@ -122,6 +127,11 @@ def evaluate_legacy_workflow(args):
     """Legacy workflow: single hypothesis file vs single reference file"""
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    # Initialize file logger
+    out_dir = Path(cfg["output"]["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    init_logger(out_dir, prefix="evaluation")
 
     # Get normalization setting from config (default: False = use jiwer)
     use_whisper_normalizer = cfg.get("evaluation", {}).get("use_whisper_normalizer", False)
@@ -132,15 +142,24 @@ def evaluate_legacy_workflow(args):
 
     # Compute WER
     m = jiwer.process_words(ref_text, hyp_text)
-    print(f"\n=== EVALUATION RESULTS ===")
-    print(f"WER: {m.wer:.3f}")
-    print(f"Substitutions: {m.substitutions}")
-    print(f"Deletions: {m.deletions}")
-    print(f"Insertions: {m.insertions}")
+    log(f"\n=== EVALUATION RESULTS ===")
+    log(f"WER: {m.wer:.3f}")
+    log(f"Substitutions: {m.substitutions}")
+    log(f"Deletions: {m.deletions}")
+    log(f"Insertions: {m.insertions}")
 
-    # Log to wandb
-    wandb.init(project=cfg["wandb"]["project"], group=cfg["wandb"].get("group"),
-               job_type="evaluation", config=cfg, tags=cfg["wandb"].get("tags", []))
+    # Log to wandb - Add "evaluation" tag to help distinguish from inference runs
+    tags = cfg["wandb"].get("tags", []).copy() if cfg["wandb"].get("tags") else []
+    if "evaluation" not in tags:
+        tags = ["evaluation"] + tags
+
+    wandb.init(project=cfg["wandb"]["project"],
+               group=cfg["wandb"].get("group"),
+               job_type="evaluation",
+               config=cfg,
+               tags=tags,
+               name=f"{cfg['experiment_id']}-evaluation")  # Explicit name for easy filtering
+
     wandb.log({
         "wer": m.wer,
         "substitutions": m.substitutions,
@@ -155,22 +174,27 @@ def evaluate_parquet_workflow(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    # Initialize file logger
+    out_dir = Path(cfg["output"]["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    init_logger(out_dir, prefix="evaluation")
+
     # Get normalization setting from config (default: False = use jiwer)
     use_whisper_normalizer = cfg.get("evaluation", {}).get("use_whisper_normalizer", False)
 
     # Print normalization method being used
     if use_whisper_normalizer:
-        print("Using Whisper normalizer (numbers, dates, contractions, etc.)")
+        log("Using Whisper normalizer (numbers, dates, contractions, etc.)")
     else:
-        print("Using jiwer normalization with contraction expansion (default)")
+        log("Using jiwer normalization with contraction expansion (default)")
 
     # Load inference results
     df_results = pd.read_parquet(args.inference_results)
-    print(f"Loaded {len(df_results)} inference results")
+    log(f"Loaded {len(df_results)} inference results")
 
     # Load ground truth parquet
     df_gt = pd.read_parquet(args.parquet)
-    print(f"Loaded {len(df_gt)} ground truth entries")
+    log(f"Loaded {len(df_gt)} ground truth entries")
 
     # Join inference results with ground truth
     # Match by file_id (index in the original dataframe)
@@ -187,7 +211,7 @@ def evaluate_parquet_workflow(args):
         reference = row.get('ground_truth', None)
 
         if reference is None:
-            print(f"[{file_id}] No ground truth available in inference results")
+            log(f"[{file_id}] No ground truth available in inference results")
             reference = None
 
         # Compute WER if we have both reference and hypothesis
@@ -202,7 +226,7 @@ def evaluate_parquet_workflow(args):
                 dels = m.deletions
                 ins = m.insertions
             except Exception as e:
-                print(f"[{file_id}] WER computation failed: {e}")
+                log(f"[{file_id}] WER computation failed: {e}")
                 wer = None
                 subs = dels = ins = None
         else:
@@ -222,7 +246,7 @@ def evaluate_parquet_workflow(args):
         })
 
         if wer is not None:
-            print(f"[{file_id}] WER: {wer:.3f} | S: {subs}, D: {dels}, I: {ins}")
+            log(f"[{file_id}] WER: {wer:.3f} | S: {subs}, D: {dels}, I: {ins}")
 
     # Create evaluation DataFrame
     df_eval_results = pd.DataFrame(eval_results)
@@ -230,12 +254,12 @@ def evaluate_parquet_workflow(args):
     # Save evaluation results
     eval_path = Path(cfg["output"]["dir"]) / "evaluation_results.parquet"
     df_eval_results.to_parquet(eval_path, index=False)
-    print(f"\nSaved evaluation results to {eval_path}")
+    log(f"\nSaved evaluation results to {eval_path}")
 
     # Also save as CSV for easy inspection
     csv_path = Path(cfg["output"]["dir"]) / "evaluation_results.csv"
     df_eval_results.to_csv(csv_path, index=False)
-    print(f"Saved evaluation results to {csv_path}")
+    log(f"Saved evaluation results to {csv_path}")
 
     # Compute aggregate metrics (only successful files with WER)
     successful = df_eval_results[df_eval_results["wer"].notna()]
@@ -248,16 +272,24 @@ def evaluate_parquet_workflow(args):
         total_dels = successful["deletions"].sum()
         total_ins = successful["insertions"].sum()
 
-        print(f"\n=== AGGREGATE METRICS ===")
-        print(f"Files evaluated: {len(successful)}")
-        print(f"Mean WER: {mean_wer:.3f}")
-        print(f"Median WER: {median_wer:.3f}")
-        print(f"Total duration: {total_duration:.1f}s")
-        print(f"Total errors - S: {total_subs}, D: {total_dels}, I: {total_ins}")
+        log(f"\n=== AGGREGATE METRICS ===")
+        log(f"Files evaluated: {len(successful)}")
+        log(f"Mean WER: {mean_wer:.3f}")
+        log(f"Median WER: {median_wer:.3f}")
+        log(f"Total duration: {total_duration:.1f}s")
+        log(f"Total errors - S: {total_subs}, D: {total_dels}, I: {total_ins}")
 
-        # Log to wandb
-        wandb.init(project=cfg["wandb"]["project"], group=cfg["wandb"].get("group"),
-                   job_type="evaluation", config=cfg, tags=cfg["wandb"].get("tags", []))
+        # Log to wandb - Add "evaluation" tag to help distinguish from inference runs
+        tags = cfg["wandb"].get("tags", []).copy() if cfg["wandb"].get("tags") else []
+        if "evaluation" not in tags:
+            tags = ["evaluation"] + tags
+
+        wandb.init(project=cfg["wandb"]["project"],
+                   group=cfg["wandb"].get("group"),
+                   job_type="evaluation",
+                   config=cfg,
+                   tags=tags,
+                   name=f"{cfg['experiment_id']}-evaluation")  # Explicit name for easy filtering
 
         wandb.log({
             "mean_wer": mean_wer,
@@ -278,7 +310,7 @@ def evaluate_parquet_workflow(args):
         wandb.save(str(csv_path))
 
     else:
-        print("\nNo successful evaluations to report")
+        log("\nNo successful evaluations to report")
 
 
 if __name__ == "__main__":

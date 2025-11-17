@@ -18,9 +18,17 @@ def main():
         model_name = Path(args.model_dir).name.replace("models--Systran--faster-", "")
         cfg["experiment_id"] = f"{cfg['experiment_id']}-override-{model_name}"
 
+    # Add "inference" tag to help distinguish from evaluation runs
+    tags = cfg["wandb"].get("tags", []).copy() if cfg["wandb"].get("tags") else []
+    if "inference" not in tags:
+        tags = ["inference"] + tags
+
     wandb.init(project=cfg["wandb"]["project"],
-               config=cfg, group=cfg["wandb"].get("group"),
-               job_type="inference", tags=cfg["wandb"].get("tags", []))
+               config=cfg,
+               group=cfg["wandb"].get("group"),
+               job_type="inference",
+               tags=tags,
+               name=f"{cfg['experiment_id']}-inference")  # Explicit name for easy filtering
 
     # Import the appropriate inference module
     scripts_dir = Path(__file__).parent
