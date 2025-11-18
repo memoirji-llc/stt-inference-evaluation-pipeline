@@ -425,50 +425,97 @@ def process_batch_aws_streaming(manifest_batch, s3_client, transcribe_client, cf
         return _build_error_results(failed_files)
 
     # ===========================================================================
-    # PHASE 2: Start transcription jobs (submit all, let AWS queue)
+    # PHASE 2: Start transcription jobs with throttling (AWS 100 concurrent limit)
     # ===========================================================================
     log(f"\n[Job Submission] Starting {len(uploaded_files)} transcription jobs...")
-    log(f"  AWS Concurrent Limit: 100 jobs (beyond this, AWS auto-queues in FIFO)")
+    log(f"  AWS Concurrent Limit: 100 jobs")
+    log(f"  Strategy: Submit in batches of 80, wait for some to complete before submitting more")
 
     jobs = []  # Store (job_name, file_info) tuples
-
-    # Start all jobs in parallel (AWS will queue beyond 100)
+    pending_uploads = list(uploaded_files)  # Files waiting to be submitted
     timestamp = int(time.time())
 
-    for idx, uf in enumerate(uploaded_files, start=1):
+    # Initial batch: submit first 80 jobs
+    BATCH_SIZE = 80  # Stay under 100 limit with safety margin
+    initial_batch = pending_uploads[:BATCH_SIZE]
+    pending_uploads = pending_uploads[BATCH_SIZE:]
+
+    log(f"\n  [Initial Batch] Submitting {len(initial_batch)} jobs...")
+    for idx, uf in enumerate(initial_batch, start=1):
         s3_uri = uf['s3_uri']
         collection_num = uf['item']['collection_number']
         file_id = uf['item']['file_id']
-
-        # Create unique job name: collection_number_timestamp_fileid
-        # AWS only allows [0-9a-zA-Z._-], so replace slashes with underscores
         safe_collection_num = collection_num.replace('/', '_')
         job_name = f"{safe_collection_num}_{timestamp}_{file_id}"
 
         try:
-            start_transcription_job(
-                transcribe_client,
-                job_name,
-                s3_uri,
-                language_code,
-                region
-            )
+            start_transcription_job(transcribe_client, job_name, s3_uri, language_code, region)
             jobs.append((job_name, uf))
 
-            if idx <= 5 or idx % 50 == 0:  # Log first 5 and every 50th
-                log(f"  [{idx}/{len(uploaded_files)}] Submitted: {collection_num}")
-                log(f"      Job Name: {job_name}")
-                log(f"      S3 URI: {s3_uri}")
-
+            if idx <= 5 or idx % 20 == 0:
+                log(f"    [{idx}/{len(initial_batch)}] Submitted: {collection_num}")
         except Exception as e:
-            log(f"  ✗ Failed to start {collection_num}: {e}")
+            log(f"    ✗ Failed to start {collection_num}: {e}")
             failed_files.append({
                 'item': uf['item'],
                 'status': 'error',
                 'error_message': f"Failed to start job: {str(e)}"
             })
 
-    log(f"  ✓ Started {len(jobs)}/{len(uploaded_files)} jobs")
+    log(f"  ✓ Initial batch: {len(jobs)} jobs submitted")
+
+    # Now submit remaining jobs dynamically as others complete
+    if pending_uploads:
+        log(f"\n  [Dynamic Submission] {len(pending_uploads)} jobs remaining, will submit as slots free up...")
+        pending_idx = 0
+        running_jobs = set(job_name for job_name, _ in jobs)  # Track running job names
+
+        while pending_uploads:
+            # Wait a bit for some jobs to complete
+            time.sleep(15)  # Check every 15 seconds
+
+            # Check how many jobs are still running
+            still_running = set()
+            for job_name in running_jobs:
+                try:
+                    response = transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
+                    status = response['TranscriptionJob']['TranscriptionJobStatus']
+                    if status == 'IN_PROGRESS':
+                        still_running.add(job_name)
+                except:
+                    pass  # Job might be done/deleted
+
+            running_jobs = still_running
+            available_slots = 100 - len(running_jobs)
+
+            if available_slots > 20:  # Submit more if we have at least 20 free slots
+                to_submit = min(available_slots - 10, len(pending_uploads))  # Keep 10 slot buffer
+                batch = pending_uploads[:to_submit]
+                pending_uploads = pending_uploads[to_submit:]
+
+                log(f"    [{len(running_jobs)} running, {available_slots} slots] Submitting {to_submit} more jobs...")
+
+                for uf in batch:
+                    s3_uri = uf['s3_uri']
+                    collection_num = uf['item']['collection_number']
+                    file_id = uf['item']['file_id']
+                    safe_collection_num = collection_num.replace('/', '_')
+                    job_name = f"{safe_collection_num}_{timestamp}_{file_id}"
+
+                    try:
+                        start_transcription_job(transcribe_client, job_name, s3_uri, language_code, region)
+                        jobs.append((job_name, uf))
+                        running_jobs.add(job_name)
+                        pending_idx += 1
+                    except Exception as e:
+                        log(f"    ✗ Failed to start {collection_num}: {e}")
+                        failed_files.append({
+                            'item': uf['item'],
+                            'status': 'error',
+                            'error_message': f"Failed to start job: {str(e)}"
+                        })
+
+    log(f"\n  ✓ All jobs submitted: {len(jobs)}/{len(uploaded_files)} total")
 
     # ===========================================================================
     # PHASE 3: Poll jobs with detailed logging
