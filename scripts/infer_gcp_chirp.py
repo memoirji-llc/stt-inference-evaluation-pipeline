@@ -481,7 +481,8 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
     # ===========================================================================
     log(f"\n[Transcription] Waiting for {len(operations)} operations to complete...")
     log(f"  Timeout per file: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
-    log(f"  Rate Limiting: Adding 0.5s delay between operation checks to avoid 'Operation requests' quota")
+    log(f"  GCP Quota: 'Operation requests' = 150 per minute (for checking operation status)")
+    log(f"  Rate Limiting: Checking operations at ~100/min (0.6s delay) to stay under quota")
     log(f"  GCP Console: https://console.cloud.google.com/speech/locations/{recognizer_location}?project={project_id}")
     log(f"\n  Starting to process operations at {time.strftime('%Y-%m-%d %H:%M:%S')}")
     log(f"  {'='*70}")
@@ -566,10 +567,11 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
             })
 
         # Rate limiting: Add delay between operation checks to avoid "Operation requests" quota
-        # GCP quota for "Operation requests per minute per region" can be hit when checking many operations
-        # Adding 0.5s delay ensures ~120 operations/minute (well under typical 300-600/min quotas)
+        # GCP V2 quota: "Operation requests per minute per region" = 150/min
+        # Each operation.result() call makes at least one operation request
+        # Delay of 0.6s ensures ~100 operations/minute (safely under 150/min quota)
         if idx < len(operations):  # Don't delay after last operation
-            time.sleep(0.5)
+            time.sleep(0.6)
 
     batch_time = time.time() - batch_start
 
