@@ -477,10 +477,11 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
     log(f"\n  ✓ Total: Started {len(operations)}/{len(uploaded_files)} operations")
 
     # ===========================================================================
-    # PHASE 4-5: Wait for operations and process results (with detailed logging)
+    # PHASE 4-5: Wait for operations and process results (with rate limit protection)
     # ===========================================================================
     log(f"\n[Transcription] Waiting for {len(operations)} operations to complete...")
     log(f"  Timeout per file: {transcribe_timeout}s ({transcribe_timeout/3600:.1f} hours)")
+    log(f"  Rate Limiting: Adding 0.5s delay between operation checks to avoid 'Operation requests' quota")
     log(f"  GCP Console: https://console.cloud.google.com/speech/locations/{recognizer_location}?project={project_id}")
     log(f"\n  Starting to process operations at {time.strftime('%Y-%m-%d %H:%M:%S')}")
     log(f"  {'='*70}")
@@ -507,8 +508,25 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
         log(f"      Started waiting at: {time.strftime('%H:%M:%S')}")
 
         try:
-            # Wait for this operation to complete
-            response = operation.result(timeout=transcribe_timeout)
+            # Wait for this operation to complete with retry on 429
+            max_retries = 3
+            retry_delay = 10  # seconds
+            response = None
+
+            for attempt in range(max_retries):
+                try:
+                    response = operation.result(timeout=transcribe_timeout)
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    error_str = str(e)
+                    # Check if it's a 429 quota error
+                    if "429" in error_str and "Quota exceeded" in error_str and attempt < max_retries - 1:
+                        log(f"      ⚠ Quota exceeded (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s before retry...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        raise  # Re-raise if not 429 or final attempt
+
             transcript = parse_gcp_response(response, gcs_uri)
             transcribe_time = time.time() - file_start
             completed_count += 1
@@ -546,6 +564,12 @@ def process_batch_gcp_streaming(manifest_batch, storage_client, speech_client, c
                 'error_message': f"Transcription error: {str(e)}",
                 'model_name': f"gcp-{model_variant}"
             })
+
+        # Rate limiting: Add delay between operation checks to avoid "Operation requests" quota
+        # GCP quota for "Operation requests per minute per region" can be hit when checking many operations
+        # Adding 0.5s delay ensures ~120 operations/minute (well under typical 300-600/min quotas)
+        if idx < len(operations):  # Don't delay after last operation
+            time.sleep(0.5)
 
     batch_time = time.time() - batch_start
 
