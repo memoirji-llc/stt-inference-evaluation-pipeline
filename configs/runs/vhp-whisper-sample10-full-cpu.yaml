@@ -1,0 +1,27 @@
+# Experiment: 10 files, full duration (CPU)
+# Process complete audio files without time limit
+
+experiment_id: vhp-whisper-sample10-full-cpu
+model:
+  name: "whisper-base"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
+  batch_size: 8
+  device: "cpu"
+  compute_type: "default"
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10
+  duration_sec: null  # Full audio, no time limit
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-whisper-sample10-full-cpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-cpu
+  tags: ["whisper-base", "sample10", "full-duration", "cpu"]

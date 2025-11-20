@@ -1,0 +1,27 @@
+# Experiment: 50 files, full duration (GPU)
+# Medium-scale experiment with complete audio files
+
+experiment_id: vhp-whisper-sample50-full-gpu
+model:
+  name: "whisper-base"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
+  batch_size: 16
+  device: "cuda"
+  compute_type: "float16"
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 50
+  duration_sec: null  # Full audio, no time limit
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-whisper-sample50-full-gpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-gpu
+  tags: ["whisper-base", "sample50", "full-duration", "gpu", "t4"]

@@ -1,0 +1,27 @@
+# Experiment: 10 files, 5 minutes each (CPU)
+# Quick test on local Mac
+
+experiment_id: vhp-whisper-sample10-300s-cpu
+model:
+  name: "whisper-base"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
+  batch_size: 8
+  device: "cpu"
+  compute_type: "default"  # Auto int8 quantization
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10
+  duration_sec: 300  # 5 minutes
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-whisper-sample10-300s-cpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-cpu
+  tags: ["whisper-base", "sample10", "duration-300s", "cpu"]

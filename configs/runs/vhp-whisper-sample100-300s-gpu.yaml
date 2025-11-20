@@ -1,0 +1,27 @@
+# Experiment: 100 files, 5 minutes each (GPU)
+# Large-scale experiment for production benchmarking
+
+experiment_id: vhp-whisper-sample100-300s-gpu
+model:
+  name: "whisper-base"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-base"
+  batch_size: 16
+  device: "cuda"
+  compute_type: "float16"
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 100
+  duration_sec: 300  # 5 minutes
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-whisper-sample100-300s-gpu"
+  save_per_file: true
+
+wandb:
+  project: amia-stt
+  group: experiments-gpu
+  tags: ["whisper-base", "sample100", "duration-300s", "gpu", "t4"]
