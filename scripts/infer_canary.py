@@ -49,6 +49,17 @@ def run(cfg):
     # Initialize file logger FIRST (before any log() calls)
     init_logger(out_dir, prefix="canary")
 
+    # Set HuggingFace cache to use local models directory (avoid re-downloading)
+    # This uses the project's models/canary cache instead of ~/.cache/huggingface
+    project_root = Path(__file__).parent.parent
+    models_cache = project_root / "models" / "canary"
+    if models_cache.exists():
+        os.environ['HF_HOME'] = str(models_cache)
+        os.environ['TRANSFORMERS_CACHE'] = str(models_cache)
+        log(f"Using local model cache: {models_cache}")
+    else:
+        log(f"Local cache not found at {models_cache}, will use default HuggingFace cache")
+
     # Load model
     model_path = cfg["model"].get("path", "nvidia/canary-qwen-2.5b")
     device = cfg["model"].get("device", "cuda")
