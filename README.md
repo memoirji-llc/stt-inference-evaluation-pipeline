@@ -1,9 +1,30 @@
 # amia2025-stt-benchmarking
 
-## introduction
-Benchmarking open-source speech-to-text models (Whisper, Wav2Vec2, MMS) on historical audio such as radio shows, cassette digitizations, and oral history recordings.
+## Introduction
+Benchmarking commercial and open-source speech-to-text models on degraded archival audio from the Library of Congress Veterans History Project (pre-2010 oral histories with analog-era degradation).
 
-This project supports a paper accepted to AMIA 2025 and aims to create a reproducible, professional-grade benchmark pipeline for degraded analog-era audio.
+**AMIA 2025 Presentation:** "Transcribing a Broken Record: Benchmarking STT for Archival Oral Histories"
+- Session 12205 | Dec 5, 2024, 3:45-4:15pm | Baltimore Marriott Waterfront
+- Focus: Practical infrastructure challenges for archivists building transcription pipelines
+
+---
+
+## Quick Status
+
+### ✅ Completed
+- 500-sample benchmarks: Google Chirp 2/3, AWS Transcribe (full-duration audio)
+- Production-grade pipeline: Rate limiting, concurrent job management, memory optimization
+- Tutorial notebooks: Whisper, Wav2Vec2, Canary-Qwen (1-sample quickstart)
+
+### ⏳ In Progress
+- Open-source baselines: Whisper, Wav2Vec2 (pending)
+- Canary-Qwen: **BLOCKED** by Azure VM RAM constraints (needs 110GB, have 28GB)
+
+### 📋 Key Documents
+- [ABSTRACTS.md](ABSTRACTS.md) - AMIA abstract, goals, timeline, lessons learned
+- [CURRENT_STATUS.md](CURRENT_STATUS.md) - Detailed project status
+- [docs/](docs/) - Reference guides (CONFIG_GUIDE, QUICK_START, etc.)
+- [communications/](communications/) - AMIA emails, speaker bio, UMSI invitations
 
 ---
 
@@ -135,6 +156,44 @@ Download model
 ---
 
 ## Pipeline Execution
+
+### Important: GCP Chirp Memory Optimization
+
+**Issue:** When running GCP Chirp on large datasets (100+ files), the VM may crash silently during preprocessing due to out-of-memory (OOM) errors.
+
+**Solution:** Use the `max_concurrent_preprocessing` parameter to limit how many files are preprocessed simultaneously, regardless of batch size.
+
+**Recommended settings for T4 VM (16 GB RAM):**
+```yaml
+model:
+  gcp:
+    max_concurrent_preprocessing: 10  # Only preprocess 10 files at a time
+    upload_workers: 30                # Upload can be higher (network-bound)
+    transcribe_workers: 20
+    batch_size: 50                    # Process 50 files before checkpoint
+```
+
+See [docs/GCP_MEMORY_OPTIMIZATION.md](docs/GCP_MEMORY_OPTIMIZATION.md) for detailed explanation and troubleshooting.
+
+### Important: Azure Blob Index Mapping
+
+**Context:** Audio files are stored in Azure Blob Storage with paths like `loc_vhp/{index}/video.mp4`, where the index comes from the **full** `veterans_history_project_resources.parquet` file.
+
+**Issue:** When you filter or slice the parquet (e.g., pre-2010, post-2010), the row indices change, breaking the blob path lookups.
+
+**Solution:** The pipeline uses the `azure_blob_index` column to map filtered parquet rows back to their original blob paths. This column is:
+- **Automatically added** when you use [notebooks/vhp_data_slicing.ipynb](notebooks/vhp_data_slicing.ipynb) to create filtered datasets
+- **Handled automatically** by [scripts/data_loader.py](scripts/data_loader.py) with this priority:
+  1. `azure_blob_index` (for filtered datasets like pre-2010, post-2010)
+  2. `original_parquet_index` (for sampled datasets)
+  3. `idx` (for full parquet without filtering/sampling)
+
+**When creating new filtered parquet files**, always preserve the original index as `azure_blob_index`:
+```python
+# After filtering
+df_filtered['azure_blob_index'] = df_filtered.index
+df_filtered.to_parquet('path/to/output.parquet', index=False)
+```
 
 ### Full Pipeline (Inference + Evaluation)
 
