@@ -350,8 +350,9 @@ def run(cfg):
     log(f"{'='*60}")
 
     # Upload artifacts to wandb
-    wandb.save(str(hyp_path))
-    wandb.save(str(results_path))
+    if use_wandb:
+        wandb.save(str(hyp_path))
+        wandb.save(str(results_path))
 
     log("Inference complete!")
     return {"hyp_path": str(hyp_path), "results_path": str(results_path)}
