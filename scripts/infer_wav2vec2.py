@@ -49,6 +49,14 @@ def run(cfg):
     # Initialize file logger FIRST (before any log() calls)
     init_logger(out_dir, prefix="wav2vec2")
 
+    # Initialize wandb if enabled
+    use_wandb = os.getenv("WANDB_MODE") != "disabled"
+    if use_wandb:
+        wandb.init(project=cfg.get("experiment_id", "wav2vec2-inference"), config=cfg)
+        log("Wandb logging enabled")
+    else:
+        log("Wandb logging disabled")
+
     # Load model
     model_dir = cfg["model"]["dir"]
     log(f"Loading Wav2Vec2 model from: {model_dir}")
@@ -226,13 +234,14 @@ def run(cfg):
                         f.write(hyp_text)
 
                 # Log to wandb
-                wandb.log({
-                    "file_id": file_id,
-                    "collection_number": collection_num,
-                    "duration_sec": actual_duration,
-                    "processing_time_sec": total_time,
-                    "hypothesis_length": len(hyp_text),
-                })
+                if use_wandb:
+                    wandb.log({
+                        "file_id": file_id,
+                        "collection_number": collection_num,
+                        "duration_sec": actual_duration,
+                        "processing_time_sec": total_time,
+                        "hypothesis_length": len(hyp_text),
+                    })
 
                 results.append({
                     "file_id": file_id,
@@ -272,7 +281,8 @@ def run(cfg):
                     # Short error, show full traceback for debugging
                     log(f"    Traceback: {traceback.format_exc()}")
 
-                wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
+                if use_wandb:
+                    wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
                 results.append({
                     "file_id": file_id,
                     "collection_number": collection_num,
@@ -300,16 +310,17 @@ def run(cfg):
     total_audio_duration = successful["duration_sec"].sum()
     total_processing_time = successful["processing_time_sec"].sum()
 
-    wandb.log({
-        "total_files": len(results),
-        "successful_files": len(successful),
-        "failed_files": len(results) - len(successful),
-        "total_audio_duration_sec": total_audio_duration,
-        "total_processing_time_sec": total_processing_time,
-        "total_experiment_time_sec": total_experiment_time,  # Wall-clock time (includes overhead)
-        "avg_processing_time_sec": successful["processing_time_sec"].mean(),
-        "speedup_factor": total_audio_duration / total_experiment_time if total_experiment_time > 0 else 0,  # How many x realtime
-    })
+    if use_wandb:
+        wandb.log({
+            "total_files": len(results),
+            "successful_files": len(successful),
+            "failed_files": len(results) - len(successful),
+            "total_audio_duration_sec": total_audio_duration,
+            "total_processing_time_sec": total_processing_time,
+            "total_experiment_time_sec": total_experiment_time,  # Wall-clock time (includes overhead)
+            "avg_processing_time_sec": successful["processing_time_sec"].mean(),
+            "speedup_factor": total_audio_duration / total_experiment_time if total_experiment_time > 0 else 0,  # How many x realtime
+        })
 
     # Print summary
     log(f"\n{'='*60}")
