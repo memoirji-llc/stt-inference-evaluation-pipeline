@@ -69,14 +69,14 @@ def run(cfg):
         log(f"Local cache not found at {models_cache}, will use default HuggingFace cache")
 
     # Load model
-    model_path = cfg["model"].get("path", "nvidia/canary-qwen-2.5b")
+    model_dir = cfg["model"]["dir"]
     device = cfg["model"].get("device", "cuda")
 
-    log(f"Loading Canary-Qwen model from: {model_path}")
+    log(f"Loading Canary-Qwen model from: {model_dir}")
     log(f"Device: {device}")
 
-    # Load Canary model
-    model = SALM.from_pretrained(model_path)
+    # Load Canary model (can be HuggingFace ID or local path)
+    model = SALM.from_pretrained(model_dir)
 
     # Move model to device if needed
     if device == "cuda" and torch.cuda.is_available():
