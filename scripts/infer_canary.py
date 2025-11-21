@@ -218,11 +218,12 @@ def run(cfg):
 
                     # Canary inference using the SALM generate API
                     # Format: list of conversations, each conversation is a list of message dicts
+                    # IMPORTANT: Must include audio_locator_tag placeholder in prompt
                     prompts = [
                         [
                             {
                                 "role": "user",
-                                "content": user_prompt,
+                                "content": f"{user_prompt} {model.audio_locator_tag}",
                                 "audio": [tmp.name]
                             }
                         ]
