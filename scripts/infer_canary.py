@@ -49,6 +49,14 @@ def run(cfg):
     # Initialize file logger FIRST (before any log() calls)
     init_logger(out_dir, prefix="canary")
 
+    # Initialize wandb if enabled
+    use_wandb = os.getenv("WANDB_MODE") != "disabled"
+    if use_wandb:
+        wandb.init(project=cfg.get("experiment_id", "canary-inference"), config=cfg)
+        log("Wandb logging enabled")
+    else:
+        log("Wandb logging disabled")
+
     # Set HuggingFace cache to use local models directory (avoid re-downloading)
     # This uses the project's models/canary cache instead of ~/.cache/huggingface
     project_root = Path(__file__).parent.parent
@@ -255,13 +263,16 @@ def run(cfg):
                             f.write(hyp_text)
 
                     # Log to wandb
-                    wandb.log({
-                        "file_id": file_id,
-                        "collection_number": collection_num,
-                        "duration_sec": actual_duration,
-                        "processing_time_sec": total_time,
-                        "hypothesis_length": len(hyp_text),
-                    })
+                    if use_wandb:
+                        wandb.log({
+                            "file_id": file_id,
+                            "collection_number": collection_num,
+                            "duration_sec": actual_duration,
+                            "processing_time_sec": total_time,
+                            "speed_factor": speed_factor,
+                            "hypothesis_length": len(hyp_text),
+                            "status": "success"
+                        })
 
                     results.append({
                         "file_id": file_id,
@@ -300,7 +311,8 @@ def run(cfg):
                     # Short error, show full traceback for debugging
                     log(f"    Traceback: {traceback.format_exc()}")
 
-                wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
+                if use_wandb:
+                    wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
                 results.append({
                     "file_id": file_id,
                     "collection_number": collection_num,
@@ -328,16 +340,17 @@ def run(cfg):
     total_audio_duration = successful["duration_sec"].sum()
     total_processing_time = successful["processing_time_sec"].sum()
 
-    wandb.log({
-        "total_files": len(results),
-        "successful_files": len(successful),
-        "failed_files": len(results) - len(successful),
-        "total_audio_duration_sec": total_audio_duration,
-        "total_processing_time_sec": total_processing_time,
-        "total_experiment_time_sec": total_experiment_time,  # Wall-clock time (includes overhead)
-        "avg_processing_time_sec": successful["processing_time_sec"].mean(),
-        "speedup_factor": total_audio_duration / total_experiment_time if total_experiment_time > 0 else 0,  # How many x realtime
-    })
+    if use_wandb:
+        wandb.log({
+            "total_files": len(results),
+            "successful_files": len(successful),
+            "failed_files": len(results) - len(successful),
+            "total_audio_duration_sec": total_audio_duration,
+            "total_processing_time_sec": total_processing_time,
+            "total_experiment_time_sec": total_experiment_time,  # Wall-clock time (includes overhead)
+            "avg_processing_time_sec": successful["processing_time_sec"].mean(),
+            "speedup_factor": total_audio_duration / total_experiment_time if total_experiment_time > 0 else 0,  # How many x realtime
+        })
 
     # Print summary
     log(f"\n{'='*60}")
@@ -352,8 +365,9 @@ def run(cfg):
     log(f"{'='*60}")
 
     # Upload artifacts to wandb
-    wandb.save(str(hyp_path))
-    wandb.save(str(results_path))
+    if use_wandb:
+        wandb.save(str(hyp_path))
+        wandb.save(str(results_path))
 
     log("Inference complete!")
     return {"hyp_path": str(hyp_path), "results_path": str(results_path)}
