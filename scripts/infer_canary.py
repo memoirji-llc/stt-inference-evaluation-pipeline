@@ -247,8 +247,10 @@ def run(cfg):
                     num_chunks = int(np.ceil(actual_duration / chunk_duration_sec))
                     log(f"  Audio duration {actual_duration:.1f}s > chunk size {chunk_duration_sec}s")
                     log(f"  → Creating {num_chunks} chunks for processing")
+                    log(f"  → Using context passing (previous chunk output as LLM prompt)")
 
                     chunk_transcripts = []
+                    previous_context = None  # Track previous chunk for context passing
                     transcribe_start = time.time()
 
                     for chunk_idx in range(num_chunks):
@@ -261,13 +263,23 @@ def run(cfg):
 
                         log(f"  Chunk {chunk_idx+1}/{num_chunks} ({chunk_start_sec:.1f}-{chunk_end_sec:.1f}s, {chunk_duration:.1f}s): Transcribing...")
 
-                        # Transcribe this chunk
+                        # Transcribe this chunk WITH CONTEXT from previous chunk
                         with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                             sf.write(tmp.name, chunk_wave, sample_rate)
 
+                            # Build prompt with context (if available)
+                            if previous_context:
+                                # Pass previous chunk as context (like Whisper's condition_on_previous_text=True)
+                                prompt_content = f"Previous context: {previous_context}\n\n{user_prompt} {model.audio_locator_tag}"
+                                log(f"  Chunk {chunk_idx+1}/{num_chunks}: Using {len(previous_context)} chars of context from previous chunk")
+                            else:
+                                # First chunk - no context available
+                                prompt_content = f"{user_prompt} {model.audio_locator_tag}"
+                                log(f"  Chunk {chunk_idx+1}/{num_chunks}: First chunk (no context)")
+
                             prompts = [[{
                                 "role": "user",
-                                "content": f"{user_prompt} {model.audio_locator_tag}",
+                                "content": prompt_content,
                                 "audio": [tmp.name]
                             }]]
 
@@ -275,6 +287,7 @@ def run(cfg):
                             chunk_text = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
 
                             chunk_transcripts.append(chunk_text)
+                            previous_context = chunk_text  # Save for next chunk
                             log(f"  Chunk {chunk_idx+1}/{num_chunks}: Complete ({len(chunk_text)} chars)")
                             log(f"  Chunk {chunk_idx+1}/{num_chunks}: Preview: {chunk_text[:50]}...")
 
