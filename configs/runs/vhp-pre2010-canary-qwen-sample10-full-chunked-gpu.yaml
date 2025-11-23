@@ -1,5 +1,6 @@
 # Configuration for NVIDIA Canary-Qwen-2.5B with chunking for long audio
 # Sample 10 files, full audio with 30s chunking (GPU memory safe)
+# Uses context passing: previous chunk output → LLM prompt (like Whisper's condition_on_previous_text=True)
 # Expected runtime: ~10-15 minutes for 10 samples on T4 GPU
 
 experiment_id: "vhp-pre2010-canary-qwen-sample10-full-chunked-gpu"
