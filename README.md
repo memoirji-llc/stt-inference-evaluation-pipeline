@@ -195,6 +195,20 @@ df_filtered['azure_blob_index'] = df_filtered.index
 df_filtered.to_parquet('path/to/output.parquet', index=False)
 ```
 
+### Inference Only
+
+Run inference without evaluation (useful for testing or when ground truth is unavailable):
+
+```bash
+uv run python scripts/run_inference.py --config configs/runs/your-experiment.yaml
+```
+
+**Outputs:**
+- `inference_results.parquet` - Per-file transcription results
+- `hyp_{model_name}.txt` - Combined hypothesis text file
+- `hyp_{file_id}.txt` - Individual hypothesis files (if `save_per_file: true`)
+- `{model}_log_*.txt` - Detailed inference log
+
 ### Full Pipeline (Inference + Evaluation)
 
 Run both inference and evaluation in one command:
