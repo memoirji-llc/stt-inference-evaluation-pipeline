@@ -116,7 +116,14 @@ def run(cfg):
 
     # User prompt for Canary (can be customized via config)
     user_prompt = cfg["model"].get("prompt", "Transcribe the following:")
-    max_new_tokens = cfg["model"].get("max_new_tokens")  # None = use model default
+
+    # Max new tokens is REQUIRED for Canary (LLM-based)
+    # Default to 512 if not specified (enough for short audio clips)
+    max_new_tokens = cfg["model"].get("max_new_tokens", 512)
+    if max_new_tokens is None:
+        log("WARNING: max_new_tokens not set in config. Using default of 512 tokens.")
+        log("         For longer audio, increase max_new_tokens in config (e.g., 2048 for 30min audio)")
+        max_new_tokens = 512
 
     with open(hyp_path, "w") as hout:
         for item in tqdm(manifest, desc="Transcribing"):
@@ -248,11 +255,8 @@ def run(cfg):
                     log(f"  Starting transcription on GPU...")
                     transcribe_start = time.time()
 
-                    # Generate transcription
-                    generate_kwargs = {"prompts": prompts}
-                    if max_new_tokens is not None:
-                        generate_kwargs["max_new_tokens"] = max_new_tokens
-                    answer_ids = model.generate(**generate_kwargs)
+                    # Generate transcription (max_new_tokens is required for Canary)
+                    answer_ids = model.generate(prompts=prompts, max_new_tokens=max_new_tokens)
 
                     transcribe_time = time.time() - transcribe_start
                     log(f"  Transcription took {transcribe_time:.1f}s")

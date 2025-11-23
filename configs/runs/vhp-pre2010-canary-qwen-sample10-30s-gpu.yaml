@@ -10,7 +10,7 @@ model:
   dir: "nvidia/canary-qwen-2.5b"  # HuggingFace model ID (will use local cache if available)
   device: "cuda"  # GPU required for Canary
   prompt: "Transcribe the following:"  # User prompt for the model
-  # max_new_tokens: omitted to use model default (no artificial limit on transcription length)
+  max_new_tokens: 512  # Required by Canary's LLM; enough for 30s audio
   batch_size: 1  # Process one file at a time
 
 # Input configuration
