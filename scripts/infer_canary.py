@@ -116,7 +116,7 @@ def run(cfg):
 
     # User prompt for Canary (can be customized via config)
     user_prompt = cfg["model"].get("prompt", "Transcribe the following:")
-    max_new_tokens = cfg["model"].get("max_new_tokens", 512)
+    max_new_tokens = cfg["model"].get("max_new_tokens")  # None = use model default
 
     with open(hyp_path, "w") as hout:
         for item in tqdm(manifest, desc="Transcribing"):
@@ -238,10 +238,10 @@ def run(cfg):
                     ]
 
                     # Generate transcription
-                    answer_ids = model.generate(
-                        prompts=prompts,
-                        max_new_tokens=max_new_tokens,
-                    )
+                    generate_kwargs = {"prompts": prompts}
+                    if max_new_tokens is not None:
+                        generate_kwargs["max_new_tokens"] = max_new_tokens
+                    answer_ids = model.generate(**generate_kwargs)
 
                     # Decode the generated tokens to text
                     hyp_text = model.tokenizer.ids_to_text(answer_ids[0].cpu())
