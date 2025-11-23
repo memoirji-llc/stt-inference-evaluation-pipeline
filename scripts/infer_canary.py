@@ -217,7 +217,15 @@ def run(cfg):
                     actual_duration = len(wave) / sample_rate
 
                 load_time = time.time() - start_time
-                log(f"  Audio loaded: {actual_duration:.1f}s in {load_time:.1f}s")
+                log(f"  Audio loaded: {actual_duration:.1f}s ({actual_duration/60:.1f} min) in {load_time:.1f}s")
+
+                # Check GPU memory before transcription
+                if torch.cuda.is_available():
+                    gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    gpu_mem_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                    gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+                    gpu_mem_free = gpu_mem_total - gpu_mem_allocated
+                    log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
                 # Transcribe with Canary
                 # Save audio to temporary WAV file for Canary
@@ -237,11 +245,17 @@ def run(cfg):
                         ]
                     ]
 
+                    log(f"  Starting transcription on GPU...")
+                    transcribe_start = time.time()
+
                     # Generate transcription
                     generate_kwargs = {"prompts": prompts}
                     if max_new_tokens is not None:
                         generate_kwargs["max_new_tokens"] = max_new_tokens
                     answer_ids = model.generate(**generate_kwargs)
+
+                    transcribe_time = time.time() - transcribe_start
+                    log(f"  Transcription took {transcribe_time:.1f}s")
 
                     # Decode the generated tokens to text
                     hyp_text = model.tokenizer.ids_to_text(answer_ids[0].cpu())
@@ -292,6 +306,12 @@ def run(cfg):
                     log(f"    - Preview: {hyp_text[:80]}...")
                     log(f"  ✓ SUCCESS")
 
+                # Clear GPU cache after each file to prevent memory accumulation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gpu_mem_allocated_after = torch.cuda.memory_allocated() / 1024**3
+                    log(f"  GPU cache cleared (now using {gpu_mem_allocated_after:.2f}GB)")
+
             except Exception as e:
                 import traceback
                 error_type = type(e).__name__
@@ -301,7 +321,19 @@ def run(cfg):
                 log(f"    Error: {error_msg}")
 
                 # Additional context for common errors
-                if "Format not recognised" in error_msg or "NoBackendError" in error_type:
+                if "out of memory" in error_msg.lower() or "OutOfMemoryError" in error_type:
+                    log(f"    → GPU ran out of memory during transcription")
+                    # Try to get audio duration if it was loaded
+                    try:
+                        if 'actual_duration' in locals():
+                            log(f"    → Audio duration was {actual_duration:.1f}s ({actual_duration/60:.1f} min)")
+                    except:
+                        pass
+                    if torch.cuda.is_available():
+                        gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                        log(f"    → GPU memory at failure: {gpu_mem_allocated:.2f}GB allocated")
+                    log(f"    → Try: 1) Reduce audio length with duration_sec config, or 2) Use larger GPU")
+                elif "Format not recognised" in error_msg or "NoBackendError" in error_type:
                     log(f"    → This file may be corrupted, empty, or in an unsupported format")
                     log(f"    → Check the blob in Azure storage: {source_path}")
                 elif "BlobNotFound" in error_type or "ResourceNotFoundError" in error_type:
@@ -310,6 +342,11 @@ def run(cfg):
                 elif len(error_msg) < 200:
                     # Short error, show full traceback for debugging
                     log(f"    Traceback: {traceback.format_exc()}")
+
+                # Clear GPU cache even on failure
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    log(f"    GPU cache cleared")
 
                 if use_wandb:
                     wandb.log({"file_id": file_id, "error": error_msg, "error_type": error_type})
