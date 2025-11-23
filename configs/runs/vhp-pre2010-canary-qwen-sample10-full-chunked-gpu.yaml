@@ -1,0 +1,39 @@
+# Configuration for NVIDIA Canary-Qwen-2.5B with chunking for long audio
+# Sample 10 files, full audio with 30s chunking (GPU memory safe)
+# Expected runtime: ~10-15 minutes for 10 samples on T4 GPU
+
+experiment_id: "vhp-pre2010-canary-qwen-sample10-full-chunked-gpu"
+
+# Model configuration
+model:
+  name: "canary"
+  dir: "nvidia/canary-qwen-2.5b"  # HuggingFace model ID (will use local cache if available)
+  device: "cuda"  # GPU required for Canary
+  prompt: "Transcribe the following:"  # User prompt for the model
+  max_new_tokens: 512  # Required by Canary's LLM; per-chunk limit
+  chunk_duration_sec: 30  # Split long audio into 30s chunks (prevents GPU OOM)
+  batch_size: 1  # Process one file at a time
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10  # Sample 10 files for testing
+  duration_sec: null  # Process full audio (chunking handles long files)
+  sample_rate: 16000  # Canary expects 16kHz
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-canary-qwen-sample10-full-chunked-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["canary-qwen", "gpu", "sample10", "vhp-pre2010", "full-audio", "chunked"]

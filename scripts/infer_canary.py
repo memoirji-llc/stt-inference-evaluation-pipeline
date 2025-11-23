@@ -125,6 +125,13 @@ def run(cfg):
         log("         For longer audio, increase max_new_tokens in config (e.g., 2048 for 30min audio)")
         max_new_tokens = 512
 
+    # Chunking configuration (for long audio on limited GPU memory)
+    chunk_duration_sec = cfg["model"].get("chunk_duration_sec", None)
+    if chunk_duration_sec:
+        log(f"Chunking enabled: {chunk_duration_sec}s chunks (for GPU memory management)")
+    else:
+        log("Chunking disabled: processing full audio (may fail on long files with limited GPU)")
+
     with open(hyp_path, "w") as hout:
         for item in tqdm(manifest, desc="Transcribing"):
             file_id = item["file_id"]
@@ -234,42 +241,85 @@ def run(cfg):
                     gpu_mem_free = gpu_mem_total - gpu_mem_allocated
                     log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
-                # Transcribe with Canary
-                # Save audio to temporary WAV file for Canary
-                with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-                    sf.write(tmp.name, wave, sample_rate)
+                # Decide if chunking is needed
+                if chunk_duration_sec and actual_duration > chunk_duration_sec:
+                    # Chunk the audio for GPU memory management
+                    num_chunks = int(np.ceil(actual_duration / chunk_duration_sec))
+                    log(f"  Audio duration {actual_duration:.1f}s > chunk size {chunk_duration_sec}s")
+                    log(f"  → Creating {num_chunks} chunks for processing")
 
-                    # Canary inference using the SALM generate API
-                    # Format: list of conversations, each conversation is a list of message dicts
-                    # IMPORTANT: Must include audio_locator_tag placeholder in prompt
-                    prompts = [
-                        [
-                            {
+                    chunk_transcripts = []
+                    transcribe_start = time.time()
+
+                    for chunk_idx in range(num_chunks):
+                        chunk_start_sec = chunk_idx * chunk_duration_sec
+                        chunk_end_sec = min((chunk_idx + 1) * chunk_duration_sec, actual_duration)
+                        chunk_start_sample = int(chunk_start_sec * sample_rate)
+                        chunk_end_sample = int(chunk_end_sec * sample_rate)
+                        chunk_wave = wave[chunk_start_sample:chunk_end_sample]
+                        chunk_duration = len(chunk_wave) / sample_rate
+
+                        log(f"  Chunk {chunk_idx+1}/{num_chunks} ({chunk_start_sec:.1f}-{chunk_end_sec:.1f}s, {chunk_duration:.1f}s): Transcribing...")
+
+                        # Transcribe this chunk
+                        with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+                            sf.write(tmp.name, chunk_wave, sample_rate)
+
+                            prompts = [[{
                                 "role": "user",
                                 "content": f"{user_prompt} {model.audio_locator_tag}",
                                 "audio": [tmp.name]
-                            }
-                        ]
-                    ]
+                            }]]
 
+                            answer_ids = model.generate(prompts=prompts, max_new_tokens=max_new_tokens)
+                            chunk_text = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
+
+                            chunk_transcripts.append(chunk_text)
+                            log(f"  Chunk {chunk_idx+1}/{num_chunks}: Complete ({len(chunk_text)} chars)")
+                            log(f"  Chunk {chunk_idx+1}/{num_chunks}: Preview: {chunk_text[:50]}...")
+
+                            # Clear GPU cache after each chunk
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                    # Merge all chunks
+                    log(f"  Merging {num_chunks} chunks → Final transcript")
+                    hyp_text = " ".join(chunk_transcripts)
+                    transcribe_time = time.time() - transcribe_start
+                    log(f"  Transcription complete: {len(hyp_text)} total chars from {num_chunks} chunks")
+
+                else:
+                    # Process full audio (no chunking)
                     log(f"  Starting transcription on GPU...")
                     transcribe_start = time.time()
 
-                    # Generate transcription (max_new_tokens is required for Canary)
-                    answer_ids = model.generate(prompts=prompts, max_new_tokens=max_new_tokens)
+                    with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+                        sf.write(tmp.name, wave, sample_rate)
+
+                        # Canary inference using the SALM generate API
+                        # Format: list of conversations, each conversation is a list of message dicts
+                        # IMPORTANT: Must include audio_locator_tag placeholder in prompt
+                        prompts = [
+                            [
+                                {
+                                    "role": "user",
+                                    "content": f"{user_prompt} {model.audio_locator_tag}",
+                                    "audio": [tmp.name]
+                                }
+                            ]
+                        ]
+
+                        # Generate transcription (max_new_tokens is required for Canary)
+                        answer_ids = model.generate(prompts=prompts, max_new_tokens=max_new_tokens)
+
+                        # Decode the generated tokens to text
+                        hyp_text = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
 
                     transcribe_time = time.time() - transcribe_start
                     log(f"  Transcription took {transcribe_time:.1f}s")
 
-                    # Decode the generated tokens to text
-                    hyp_text = model.tokenizer.ids_to_text(answer_ids[0].cpu())
-
-                    # Clean up the text (remove special tokens if any)
-                    hyp_text = hyp_text.strip()
-
-                    total_time = time.time() - start_time
-                    transcribe_time = total_time - load_time
-                    speed_factor = actual_duration / total_time if total_time > 0 else 0
+                total_time = time.time() - start_time
+                speed_factor = actual_duration / total_time if total_time > 0 else 0
 
                     # Write to output file (one line per file)
                     hout.write(hyp_text + "\n")
