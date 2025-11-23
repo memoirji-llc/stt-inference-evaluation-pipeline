@@ -38,6 +38,9 @@ def main():
     elif "wav2vec2" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_wav2vec2 as mod
+    elif "canary" in cfg["model"]["name"]:
+        sys.path.insert(0, str(scripts_dir))
+        import infer_canary as mod
     elif "gcp_chirp" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_gcp_chirp as mod
