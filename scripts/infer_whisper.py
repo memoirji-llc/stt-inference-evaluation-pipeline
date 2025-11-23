@@ -208,9 +208,20 @@ def run(cfg):
                     actual_duration = len(wave) / sample_rate
 
                 load_time = time.time() - start_time
-                log(f"  Audio loaded: {actual_duration:.1f}s in {load_time:.1f}s")
+                log(f"  Audio loaded: {actual_duration:.1f}s ({actual_duration/60:.1f} min) in {load_time:.1f}s")
+
+                # Check GPU memory if using GPU
+                if device == "cuda" and torch.cuda.is_available():
+                    gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    gpu_mem_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                    gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+                    gpu_mem_free = gpu_mem_total - gpu_mem_allocated
+                    log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
                 # Transcribe
+                log(f"  Starting transcription...")
+                transcribe_start = time.time()
+
                 with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                     sf.write(tmp.name, wave, sample_rate)
 
@@ -233,8 +244,9 @@ def run(cfg):
                     # Join segments
                     hyp_text = " ".join(s.text.strip() for s in segments)
                     total_time = time.time() - start_time
-                    transcribe_time = total_time - load_time
+                    transcribe_time = time.time() - transcribe_start
                     speed_factor = actual_duration / total_time if total_time > 0 else 0
+                    log(f"  Transcription took {transcribe_time:.1f}s")
 
                     # Write to output file (one line per file)
                     hout.write(hyp_text + "\n")
