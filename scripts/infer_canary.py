@@ -321,44 +321,44 @@ def run(cfg):
                 total_time = time.time() - start_time
                 speed_factor = actual_duration / total_time if total_time > 0 else 0
 
-                    # Write to output file (one line per file)
-                    hout.write(hyp_text + "\n")
+                # Write to output file (one line per file)
+                hout.write(hyp_text + "\n")
 
-                    # Save per-file result
-                    if cfg["output"].get("save_per_file", False):
-                        per_file_path = out_dir / f"hyp_{file_id}.txt"
-                        with open(per_file_path, "w") as f:
-                            f.write(hyp_text)
+                # Save per-file result
+                if cfg["output"].get("save_per_file", False):
+                    per_file_path = out_dir / f"hyp_{file_id}.txt"
+                    with open(per_file_path, "w") as f:
+                        f.write(hyp_text)
 
-                    # Log to wandb
-                    if use_wandb:
-                        wandb.log({
-                            "file_id": file_id,
-                            "collection_number": collection_num,
-                            "duration_sec": actual_duration,
-                            "processing_time_sec": total_time,
-                            "speed_factor": speed_factor,
-                            "hypothesis_length": len(hyp_text),
-                            "status": "success"
-                        })
-
-                    results.append({
+                # Log to wandb
+                if use_wandb:
+                    wandb.log({
                         "file_id": file_id,
                         "collection_number": collection_num,
-                        "blob_path": source_path,
-                        "hypothesis": hyp_text,
                         "duration_sec": actual_duration,
                         "processing_time_sec": total_time,
-                        "status": "success",
+                        "speed_factor": speed_factor,
+                        "hypothesis_length": len(hyp_text),
+                        "status": "success"
                     })
 
-                    # Improved logging
-                    log(f"  Transcription complete!")
-                    log(f"    - Audio duration: {actual_duration:.1f}s")
-                    log(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
-                    log(f"    - Speed: {speed_factor:.1f}x realtime")
-                    log(f"    - Preview: {hyp_text[:80]}...")
-                    log(f"  ✓ SUCCESS")
+                results.append({
+                    "file_id": file_id,
+                    "collection_number": collection_num,
+                    "blob_path": source_path,
+                    "hypothesis": hyp_text,
+                    "duration_sec": actual_duration,
+                    "processing_time_sec": total_time,
+                    "status": "success",
+                })
+
+                # Improved logging
+                log(f"  Transcription complete!")
+                log(f"    - Audio duration: {actual_duration:.1f}s")
+                log(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
+                log(f"    - Speed: {speed_factor:.1f}x realtime")
+                log(f"    - Preview: {hyp_text[:80]}...")
+                log(f"  ✓ SUCCESS")
 
                 # Clear GPU cache after each file to prevent memory accumulation
                 if torch.cuda.is_available():
