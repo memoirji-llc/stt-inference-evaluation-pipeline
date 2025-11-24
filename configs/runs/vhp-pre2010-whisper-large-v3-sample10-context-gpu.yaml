@@ -1,0 +1,39 @@
+# Configuration for Whisper Large-V3 with CONTEXT PASSING ENABLED
+# Sample 10 files, full audio with condition_on_previous_text=True
+# CORRECTED VERSION: Enables context passing for fair comparison with Canary-Qwen
+# Expected runtime: ~15-20 minutes for 10 samples on T4 GPU
+
+experiment_id: "vhp-pre2010-whisper-large-v3-sample10-context-gpu"
+
+# Model configuration
+model:
+  name: "whisper-large-v3"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-large-v3"
+  batch_size: 1  # Cannot batch when context passing is enabled
+  device: "cuda"
+  compute_type: "float16"
+  condition_on_previous_text: true  # ← CRITICAL: Enable context passing for fair comparison
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10  # Sample 10 files for testing
+  duration_sec: null  # Process full audio
+  sample_rate: 16000
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-whisper-large-v3-sample10-context-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["whisper-large-v3", "gpu", "sample10", "vhp-pre2010", "full-audio", "context-passing"]

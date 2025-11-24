@@ -71,6 +71,8 @@ def run(cfg):
 
     # Use batched pipeline if batch_size specified
     batch_size = cfg["model"].get("batch_size", 1)
+    condition_on_previous_text = cfg["model"].get("condition_on_previous_text", True)
+
     base_model = WhisperModel(model_file_dir, device=device, compute_type=compute_type)
 
     if batch_size > 1:
@@ -79,6 +81,8 @@ def run(cfg):
     else:
         model = base_model
         log("Using standard WhisperModel (no batching)")
+
+    log(f"Context passing (condition_on_previous_text): {condition_on_previous_text}")
 
     # Determine input source
     source_type = cfg["input"].get("source", "local")
@@ -225,6 +229,9 @@ def run(cfg):
                 with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                     sf.write(tmp.name, wave, sample_rate)
 
+                    # Get context passing setting from config (default: True for fair comparison)
+                    condition_on_previous_text = cfg["model"].get("condition_on_previous_text", True)
+
                     transcribe_args = {
                         "beam_size": 1,
                         "temperature": 0.0,
@@ -233,7 +240,7 @@ def run(cfg):
                         "word_timestamps": False,
                         "initial_prompt": None,
                         "suppress_tokens": [-1],
-                        "condition_on_previous_text": False,
+                        "condition_on_previous_text": condition_on_previous_text,
                     }
 
                     if batch_size > 1:
