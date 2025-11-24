@@ -246,13 +246,14 @@ def run(cfg):
 
                     # Canary-1B transcription (pure ASR, no prompting)
                     # Default behavior: English ASR with punctuation
+                    # Note: transcribe() returns a list of strings (not objects)
                     predicted_text = model.transcribe(
-                        paths2audio_files=[tmp.name],
+                        audio=[tmp.name],
                         batch_size=1,
                     )
 
-                    # Extract transcription from result
-                    hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
+                    # Extract transcription from result (returns list of strings)
+                    hyp_text = predicted_text[0] if isinstance(predicted_text, list) else str(predicted_text)
 
                 transcribe_time = time.time() - transcribe_start
                 log(f"  Transcription complete: {len(hyp_text)} chars in {transcribe_time:.1f}s")
