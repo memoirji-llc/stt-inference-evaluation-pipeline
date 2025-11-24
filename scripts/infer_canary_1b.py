@@ -79,16 +79,6 @@ def run(cfg):
 
     # Log tokenizer info
     log(f"Model tokenizer type: {type(model.tokenizer)}")
-    if hasattr(model.tokenizer, 'tokenizers_dict'):
-        log(f"  AggregateTokenizer detected. Available languages: {list(model.tokenizer.tokenizers_dict.keys())}")
-
-    # Configure decoding strategy
-    decode_cfg = model.cfg.decoding
-    log(f"Initial decoding config - compute_langs: {decode_cfg.compute_langs}")
-    decode_cfg.beam.beam_size = 1  # Greedy decoding (faster)
-    decode_cfg.compute_langs = True  # Enable language computation for AggregateTokenizer
-    model.change_decoding_strategy(decode_cfg)
-    log(f"Updated decoding config - compute_langs: {model.cfg.decoding.compute_langs}, beam_size: {model.cfg.decoding.beam.beam_size}")
 
     # Move model to device if needed
     if device == "cuda" and torch.cuda.is_available():
@@ -97,13 +87,7 @@ def run(cfg):
     else:
         log("Model loaded on CPU")
 
-    # Get transcribe config and set up for inference
-    transcribe_cfg = model.get_transcribe_config()
-    log(f"Default transcribe config attributes: {[attr for attr in dir(transcribe_cfg) if not attr.startswith('_')]}")
-    transcribe_cfg.batch_size = cfg["model"].get("batch_size", 1)
-    transcribe_cfg.return_hypotheses = True  # Return hypothesis objects
-    transcribe_cfg.lang_field = "target_lang"  # Field name in manifest for language
-    log(f"Final transcribe config: batch_size={transcribe_cfg.batch_size}, lang_field={transcribe_cfg.lang_field}, return_hypotheses={transcribe_cfg.return_hypotheses}")
+    log(f"Model ready for inference (using official Canary API with source_lang/target_lang params)")
 
     # Determine input source
     source_type = cfg["input"].get("source", "local")
