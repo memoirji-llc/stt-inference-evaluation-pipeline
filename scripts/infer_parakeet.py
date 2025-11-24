@@ -261,6 +261,12 @@ def run(cfg):
                     gpu_mem_free = gpu_mem_total - gpu_mem_allocated
                     log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
+                # Clear GPU cache before transcription (prevent memory accumulation)
+                if device == "cuda" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
+
                 # Transcribe
                 log(f"  Starting transcription...")
                 transcribe_start = time.time()
@@ -276,6 +282,7 @@ def run(cfg):
 
                     output = model.transcribe(
                         [tmp_wav.name],
+                        batch_size=1,  # Process one file at a time (critical for memory management)
                         timestamps=enable_timestamps  # Enable word/segment/char timestamps if requested
                     )
 

@@ -13,12 +13,14 @@ model:
   device: "cuda"  # GPU required for fast processing
   enable_timestamps: false  # Set true for word/segment/char timestamps
 
-  # Long audio support (bulletproof config for production)
-  # BOTH mechanisms needed to handle audio up to 13 hours
+  # Long audio support - NOTE: "bulletproof" config (local attn + subsampling) DOES NOT WORK on T4!
+  # NVIDIA's 13hr claim is for A100 80GB, not T4 14.56GB
+  # Real-world T4 limits: ~30 min with local attention, OOM beyond that
+  # For production: need manual Python chunking for files >30 min (like Canary-Qwen)
   use_local_attention: true  # Solves attention layer memory (O(n²) → O(n))
-  att_context_size: [128, 128]  # [left, right] context in frames. Smaller = longer max audio. 128=13hrs, 256=3hrs
-  enable_subsampling_chunking: true  # Solves conv layer memory (processes raw audio in chunks)
-  subsampling_chunking_factor: 1  # 1=auto-select, -1=disabled. Required for audio >3 hours
+  att_context_size: [256, 256]  # [left, right] context in frames. Smaller context = longer max audio
+  enable_subsampling_chunking: true  # Solves conv layer memory (helps but NOT sufficient on T4)
+  subsampling_chunking_factor: 1  # 1=auto-select, -1=disabled
 
 # Input configuration
 input:

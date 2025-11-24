@@ -1,0 +1,47 @@
+# Configuration for NVIDIA Parakeet-TDT-0.6B-v3 (fastest multilingual ASR)
+# Sample 1000 files, full audio without manual Python chunking
+# Model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+# Performance: RTFx 3332.74 (4.4x faster than Canary-1B), 6.32% WER (English)
+# Expected runtime: ~5-8 hours for 1000 samples on T4 GPU (assuming ~20% OOM for >30 min files)
+# Note: Files >30 min will OOM gracefully and be skipped
+
+experiment_id: "vhp-pre2010-parakeet-sample1000-full-gpu"
+
+# Model configuration
+model:
+  name: "parakeet-tdt-0.6b-v3"
+  dir: "nvidia/parakeet-tdt-0.6b-v3"  # HuggingFace model ID
+  device: "cuda"  # GPU required for fast processing
+  enable_timestamps: false  # Set true for word/segment/char timestamps
+
+  # Optimized config for T4 GPU (best quality within T4 constraints)
+  # Real-world T4 limits: ~30 min max with local attention
+  # Files >30 min will fail gracefully with OOM (captured in status column)
+  use_local_attention: true  # Enables O(n) memory scaling vs O(n²)
+  att_context_size: [256, 256]  # 13-sec context window - best quality for T4
+  enable_subsampling_chunking: true  # Enable conv layer optimization (limited benefit on T4)
+  subsampling_chunking_factor: 1  # Auto-select chunk size
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 1000  # Full benchmark with 1000 files
+  duration_sec: null  # Process full audio (will OOM on >30 min files)
+  sample_rate: 16000  # Parakeet expects 16kHz
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-parakeet-sample1000-full-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["parakeet-tdt-0.6b-v3", "gpu", "sample1000", "vhp-pre2010", "full-audio", "fastest-asr", "600M-params", "partial-coverage"]
