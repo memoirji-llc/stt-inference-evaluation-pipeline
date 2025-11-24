@@ -1,14 +1,14 @@
-# Configuration for NVIDIA Canary-1B (pure ASR model)
+# Configuration for NVIDIA Canary-1B-v2 (pure ASR model, 978M params)
 # Sample 10 files, full audio without chunking
-# Canary-1B has timestamp support and lower memory footprint than Canary-Qwen
+# v2 improvements: 25 languages, 8.40% WER on Fleurs-25, trained on 1.7M hours
 # Expected runtime: ~5-10 minutes for 10 samples on T4 GPU
 
-experiment_id: "vhp-pre2010-canary-1b-sample10-full-gpu"
+experiment_id: "vhp-pre2010-canary-1b-v2-sample10-full-gpu"
 
 # Model configuration
 model:
-  name: "canary-1b"
-  dir: "nvidia/canary-1b"  # HuggingFace model ID
+  name: "canary-1b-v2"
+  dir: "nvidia/canary-1b-v2"  # HuggingFace model ID (v2 is newer/better)
   device: "cuda"  # GPU required for fast processing
   batch_size: 1  # Process one file at a time
 
@@ -23,7 +23,7 @@ input:
 
 # Output configuration
 output:
-  dir: "outputs/vhp-pre2010-canary-1b-sample10-full-gpu"
+  dir: "outputs/vhp-pre2010-canary-1b-v2-sample10-full-gpu"
   save_per_file: true  # Save individual hypothesis files
 
 # Evaluation configuration
@@ -34,4 +34,4 @@ evaluation:
 wandb:
   project: amia-stt
   group: open-source-models
-  tags: ["canary-1b", "gpu", "sample10", "vhp-pre2010", "full-audio", "pure-asr"]
+  tags: ["canary-1b-v2", "gpu", "sample10", "vhp-pre2010", "full-audio", "pure-asr", "978M-params"]

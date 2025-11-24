@@ -254,63 +254,45 @@ def run(cfg):
                     log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
                 # Transcribe using Canary-1B's native transcribe() method
+                # Using the official API from NeMo tutorial (pass audio path + lang params directly)
                 log(f"  Starting transcription...")
                 transcribe_start = time.time()
 
                 with NamedTemporaryFile(suffix=".wav", delete=True) as tmp_wav:
                     sf.write(tmp_wav.name, wave, sample_rate)
                     log(f"  Created temp WAV file: {tmp_wav.name}")
+                    log(f"  Calling model.transcribe() with audio path and language params...")
 
-                    # Canary-1B requires a manifest file with task/language metadata
-                    # Create temporary manifest for this audio file
-                    import json
-                    with NamedTemporaryFile(mode='w', suffix=".json", delete=True) as tmp_manifest:
-                        manifest_entry = {
-                            "audio_filepath": tmp_wav.name,
-                            "duration": actual_duration,
-                            "taskname": "asr",  # ASR (not translation)
-                            "source_lang": "en",  # English audio
-                            "target_lang": "en",  # English text
-                            "lang": "en",  # Required for AggregateTokenizer
-                            "pnc": "yes",  # Enable punctuation and capitalization
-                            "answer": "na"  # Not used for inference
-                        }
-                        manifest_json = json.dumps(manifest_entry)
-                        tmp_manifest.write(manifest_json + "\n")
-                        tmp_manifest.flush()
-                        log(f"  Created temp manifest: {tmp_manifest.name}")
-                        log(f"  Manifest content: {manifest_json}")
-                        log(f"  Override config - batch_size: {transcribe_cfg.batch_size}, lang_field: {transcribe_cfg.lang_field}")
-                        log(f"  Decoding config - compute_langs: {model.cfg.decoding.compute_langs}")
+                    # Use official Canary API (from NeMo tutorial)
+                    # Pass audio path directly with source_lang/target_lang parameters
+                    try:
+                        predicted_text = model.transcribe(
+                            audio=[tmp_wav.name],
+                            batch_size=1,
+                            source_lang='en',  # Input audio language
+                            target_lang='en',  # Output text language
+                            timestamps=False,  # We don't need timestamps for WER evaluation
+                        )
+                        log(f"  transcribe() returned. Type: {type(predicted_text)}, Length: {len(predicted_text) if isinstance(predicted_text, list) else 'N/A'}")
 
-                        # Transcribe using manifest file with override config
-                        log(f"  Calling model.transcribe()...")
-                        try:
-                            predicted_text = model.transcribe(
-                                tmp_manifest.name,
-                                override_config=transcribe_cfg,
-                            )
-                            log(f"  transcribe() returned. Type: {type(predicted_text)}, Length: {len(predicted_text) if isinstance(predicted_text, list) else 'N/A'}")
+                        if isinstance(predicted_text, list) and len(predicted_text) > 0:
+                            log(f"  First result type: {type(predicted_text[0])}")
+                            if hasattr(predicted_text[0], 'text'):
+                                log(f"  Has .text attribute")
+                            else:
+                                log(f"  WARNING: No .text attribute found. Available attributes: {[a for a in dir(predicted_text[0]) if not a.startswith('_')]}")
 
-                            if isinstance(predicted_text, list) and len(predicted_text) > 0:
-                                log(f"  First result type: {type(predicted_text[0])}")
-                                log(f"  First result attributes: {dir(predicted_text[0])}")
-                                if hasattr(predicted_text[0], 'text'):
-                                    log(f"  Has .text attribute")
-                                else:
-                                    log(f"  WARNING: No .text attribute found")
+                    except Exception as e:
+                        log(f"  ERROR in model.transcribe(): {type(e).__name__}: {str(e)}")
+                        import traceback
+                        log(f"  Traceback:\n{traceback.format_exc()}")
+                        raise
 
-                        except Exception as e:
-                            log(f"  ERROR in model.transcribe(): {type(e).__name__}: {str(e)}")
-                            import traceback
-                            log(f"  Traceback:\n{traceback.format_exc()}")
-                            raise
-
-                        # Extract transcription from result
-                        # Returns list of Hypothesis objects with .text attribute
-                        log(f"  Extracting text from result...")
-                        hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
-                        log(f"  Extracted text length: {len(hyp_text)} chars")
+                    # Extract transcription from result
+                    # Returns list of Hypothesis objects with .text attribute
+                    log(f"  Extracting text from result...")
+                    hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
+                    log(f"  Extracted text length: {len(hyp_text)} chars")
 
                 transcribe_time = time.time() - transcribe_start
                 log(f"  Transcription complete: {len(hyp_text)} chars in {transcribe_time:.1f}s")
