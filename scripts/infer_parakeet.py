@@ -96,13 +96,23 @@ def run(cfg):
     use_local_attention = cfg["model"].get("use_local_attention", False)
     att_context_size = cfg["model"].get("att_context_size", [256, 256])
 
+    # Check if we should enable subsampling conv chunking (for very long audio >3 hrs)
+    enable_subsampling_chunking = cfg["model"].get("enable_subsampling_chunking", False)
+    subsampling_factor = cfg["model"].get("subsampling_chunking_factor", 1)
+
     if use_local_attention:
         log(f"Enabling local attention with context size: {att_context_size}")
-        log("This allows processing up to 3 hours of audio")
         model.change_attention_model(
             self_attention_model="rel_pos_local_attn",
             att_context_size=att_context_size
         )
+
+        if enable_subsampling_chunking:
+            log(f"Enabling subsampling conv chunking (factor: {subsampling_factor})")
+            log("This allows processing up to 13 hours of audio (bulletproof mode)")
+            model.change_subsampling_conv_chunking_factor(subsampling_factor)
+        else:
+            log("Subsampling chunking disabled (handles up to 3 hours)")
     else:
         log("Using full attention (default)")
         log("Max audio length: ~24 minutes on A100 80GB")

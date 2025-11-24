@@ -1,5 +1,5 @@
 # Configuration for NVIDIA Parakeet-TDT-0.6B-v3 (fastest multilingual ASR)
-# Sample 10 files, full audio without chunking
+# Sample 10 files, full audio without manual Python chunking
 # Model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 # Performance: RTFx 3332.74 (4.4x faster than Canary-1B), 6.32% WER (English)
 # Expected runtime: ~3-5 minutes for 10 samples on T4 GPU
@@ -12,8 +12,13 @@ model:
   dir: "nvidia/parakeet-tdt-0.6b-v3"  # HuggingFace model ID
   device: "cuda"  # GPU required for fast processing
   enable_timestamps: false  # Set true for word/segment/char timestamps
-  use_local_attention: false  # Set true for very long audio (>24 min, up to 3 hrs)
-  att_context_size: [256, 256]  # Context size for local attention (if enabled)
+
+  # Long audio support (bulletproof config for production)
+  # BOTH mechanisms needed to handle audio up to 13 hours
+  use_local_attention: true  # Solves attention layer memory (O(n²) → O(n))
+  att_context_size: [128, 128]  # [left, right] context in frames. Smaller = longer max audio. 128=13hrs, 256=3hrs
+  enable_subsampling_chunking: true  # Solves conv layer memory (processes raw audio in chunks)
+  subsampling_chunking_factor: 1  # 1=auto-select, -1=disabled. Required for audio >3 hours
 
 # Input configuration
 input:
