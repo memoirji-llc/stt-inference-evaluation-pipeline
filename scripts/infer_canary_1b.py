@@ -261,6 +261,7 @@ def run(cfg):
                             "taskname": "asr",  # ASR (not translation)
                             "source_lang": "en",  # English audio
                             "target_lang": "en",  # English text
+                            "lang": "en",  # Required for AggregateTokenizer
                             "pnc": "yes",  # Enable punctuation and capitalization
                             "answer": "na"  # Not used for inference
                         }
