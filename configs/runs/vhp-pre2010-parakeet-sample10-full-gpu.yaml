@@ -1,0 +1,40 @@
+# Configuration for NVIDIA Parakeet-TDT-0.6B-v3 (fastest multilingual ASR)
+# Sample 10 files, full audio without chunking
+# Model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+# Performance: RTFx 3332.74 (4.4x faster than Canary-1B), 6.32% WER (English)
+# Expected runtime: ~3-5 minutes for 10 samples on T4 GPU
+
+experiment_id: "vhp-pre2010-parakeet-sample10-full-gpu"
+
+# Model configuration
+model:
+  name: "parakeet-tdt-0.6b-v3"
+  dir: "nvidia/parakeet-tdt-0.6b-v3"  # HuggingFace model ID
+  device: "cuda"  # GPU required for fast processing
+  enable_timestamps: false  # Set true for word/segment/char timestamps
+  use_local_attention: false  # Set true for very long audio (>24 min, up to 3 hrs)
+  att_context_size: [256, 256]  # Context size for local attention (if enabled)
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10  # Sample 10 files for testing
+  duration_sec: null  # Process full audio
+  sample_rate: 16000  # Parakeet expects 16kHz
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-parakeet-sample10-full-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["parakeet-tdt-0.6b-v3", "gpu", "sample10", "vhp-pre2010", "full-audio", "fastest-asr", "600M-params"]

@@ -44,6 +44,9 @@ def main():
     elif "canary-1b" in cfg["model"]["name"] or "canary_1b" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_canary_1b as mod
+    elif "parakeet" in cfg["model"]["name"]:
+        sys.path.insert(0, str(scripts_dir))
+        import infer_parakeet as mod
     elif "canary" in cfg["model"]["name"]:
         # Legacy support - default to canary-qwen
         sys.path.insert(0, str(scripts_dir))
