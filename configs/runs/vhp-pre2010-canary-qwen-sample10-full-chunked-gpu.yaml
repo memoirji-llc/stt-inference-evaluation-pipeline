@@ -13,6 +13,7 @@ model:
   prompt: "Transcribe the following:"  # User prompt for the model
   max_new_tokens: 512  # Required by Canary's LLM; per-chunk limit
   chunk_duration_sec: 30  # Split long audio into 30s chunks (prevents GPU OOM)
+  custom_context_passing: true  # ← CRITICAL: Custom implementation of context passing (like Whisper's condition_on_previous_text=True)
   batch_size: 1  # Process one file at a time
 
 # Input configuration

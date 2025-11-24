@@ -132,6 +132,16 @@ def run(cfg):
     else:
         log("Chunking disabled: processing full audio (may fail on long files with limited GPU)")
 
+    # Context passing configuration (for coherence across chunk boundaries)
+    # Try new name first, fall back to old name for backwards compatibility
+    custom_context_passing = cfg["model"].get("custom_context_passing", cfg["model"].get("use_context_passing", True))
+    if chunk_duration_sec and custom_context_passing:
+        log(f"Custom context passing enabled: previous chunk output → LLM prompt (like Whisper's condition_on_previous_text=True)")
+    elif chunk_duration_sec and not custom_context_passing:
+        log(f"Custom context passing disabled: each chunk processed independently (faster, lower coherence)")
+    else:
+        log(f"Custom context passing N/A: no chunking (full audio processed at once)")
+
     with open(hyp_path, "w") as hout:
         for item in tqdm(manifest, desc="Transcribing"):
             file_id = item["file_id"]
@@ -263,19 +273,22 @@ def run(cfg):
 
                         log(f"  Chunk {chunk_idx+1}/{num_chunks} ({chunk_start_sec:.1f}-{chunk_end_sec:.1f}s, {chunk_duration:.1f}s): Transcribing...")
 
-                        # Transcribe this chunk WITH CONTEXT from previous chunk
+                        # Transcribe this chunk (WITH or WITHOUT context based on config)
                         with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                             sf.write(tmp.name, chunk_wave, sample_rate)
 
-                            # Build prompt with context (if available)
-                            if previous_context:
+                            # Build prompt with context (if enabled and available)
+                            if custom_context_passing and previous_context:
                                 # Pass previous chunk as context (like Whisper's condition_on_previous_text=True)
                                 prompt_content = f"Previous context: {previous_context}\n\n{user_prompt} {model.audio_locator_tag}"
                                 log(f"  Chunk {chunk_idx+1}/{num_chunks}: Using {len(previous_context)} chars of context from previous chunk")
                             else:
-                                # First chunk - no context available
+                                # First chunk OR context passing disabled
                                 prompt_content = f"{user_prompt} {model.audio_locator_tag}"
-                                log(f"  Chunk {chunk_idx+1}/{num_chunks}: First chunk (no context)")
+                                if chunk_idx == 0:
+                                    log(f"  Chunk {chunk_idx+1}/{num_chunks}: First chunk (no context)")
+                                elif not custom_context_passing:
+                                    log(f"  Chunk {chunk_idx+1}/{num_chunks}: Independent (custom context passing disabled)")
 
                             prompts = [[{
                                 "role": "user",
@@ -287,7 +300,8 @@ def run(cfg):
                             chunk_text = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
 
                             chunk_transcripts.append(chunk_text)
-                            previous_context = chunk_text  # Save for next chunk
+                            if custom_context_passing:
+                                previous_context = chunk_text  # Save for next chunk (only if custom context passing enabled)
                             log(f"  Chunk {chunk_idx+1}/{num_chunks}: Complete ({len(chunk_text)} chars)")
                             log(f"  Chunk {chunk_idx+1}/{num_chunks}: Preview: {chunk_text[:50]}...")
 

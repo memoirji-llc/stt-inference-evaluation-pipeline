@@ -38,9 +38,16 @@ def main():
     elif "wav2vec2" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_wav2vec2 as mod
-    elif "canary" in cfg["model"]["name"]:
+    elif "canary-qwen" in cfg["model"]["name"] or "canary_qwen" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
-        import infer_canary as mod
+        import infer_canary_qwen as mod
+    elif "canary-1b" in cfg["model"]["name"] or "canary_1b" in cfg["model"]["name"]:
+        sys.path.insert(0, str(scripts_dir))
+        import infer_canary_1b as mod
+    elif "canary" in cfg["model"]["name"]:
+        # Legacy support - default to canary-qwen
+        sys.path.insert(0, str(scripts_dir))
+        import infer_canary_qwen as mod
     elif "gcp_chirp" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_gcp_chirp as mod
