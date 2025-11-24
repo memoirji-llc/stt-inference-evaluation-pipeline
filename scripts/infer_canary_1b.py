@@ -77,10 +77,18 @@ def run(cfg):
     # Load Canary-1B model (can be HuggingFace ID or local path)
     model = EncDecMultiTaskModel.from_pretrained(model_dir)
 
+    # Log tokenizer info
+    log(f"Model tokenizer type: {type(model.tokenizer)}")
+    if hasattr(model.tokenizer, 'tokenizers_dict'):
+        log(f"  AggregateTokenizer detected. Available languages: {list(model.tokenizer.tokenizers_dict.keys())}")
+
     # Configure decoding strategy
     decode_cfg = model.cfg.decoding
+    log(f"Initial decoding config - compute_langs: {decode_cfg.compute_langs}")
     decode_cfg.beam.beam_size = 1  # Greedy decoding (faster)
+    decode_cfg.compute_langs = True  # Enable language computation for AggregateTokenizer
     model.change_decoding_strategy(decode_cfg)
+    log(f"Updated decoding config - compute_langs: {model.cfg.decoding.compute_langs}, beam_size: {model.cfg.decoding.beam.beam_size}")
 
     # Move model to device if needed
     if device == "cuda" and torch.cuda.is_available():
@@ -91,10 +99,11 @@ def run(cfg):
 
     # Get transcribe config and set up for inference
     transcribe_cfg = model.get_transcribe_config()
+    log(f"Default transcribe config attributes: {[attr for attr in dir(transcribe_cfg) if not attr.startswith('_')]}")
     transcribe_cfg.batch_size = cfg["model"].get("batch_size", 1)
     transcribe_cfg.return_hypotheses = True  # Return hypothesis objects
     transcribe_cfg.lang_field = "target_lang"  # Field name in manifest for language
-    log(f"Transcribe config: batch_size={transcribe_cfg.batch_size}, lang_field={transcribe_cfg.lang_field}")
+    log(f"Final transcribe config: batch_size={transcribe_cfg.batch_size}, lang_field={transcribe_cfg.lang_field}, return_hypotheses={transcribe_cfg.return_hypotheses}")
 
     # Determine input source
     source_type = cfg["input"].get("source", "local")
@@ -250,6 +259,7 @@ def run(cfg):
 
                 with NamedTemporaryFile(suffix=".wav", delete=True) as tmp_wav:
                     sf.write(tmp_wav.name, wave, sample_rate)
+                    log(f"  Created temp WAV file: {tmp_wav.name}")
 
                     # Canary-1B requires a manifest file with task/language metadata
                     # Create temporary manifest for this audio file
@@ -265,18 +275,42 @@ def run(cfg):
                             "pnc": "yes",  # Enable punctuation and capitalization
                             "answer": "na"  # Not used for inference
                         }
-                        tmp_manifest.write(json.dumps(manifest_entry) + "\n")
+                        manifest_json = json.dumps(manifest_entry)
+                        tmp_manifest.write(manifest_json + "\n")
                         tmp_manifest.flush()
+                        log(f"  Created temp manifest: {tmp_manifest.name}")
+                        log(f"  Manifest content: {manifest_json}")
+                        log(f"  Override config - batch_size: {transcribe_cfg.batch_size}, lang_field: {transcribe_cfg.lang_field}")
+                        log(f"  Decoding config - compute_langs: {model.cfg.decoding.compute_langs}")
 
                         # Transcribe using manifest file with override config
-                        predicted_text = model.transcribe(
-                            tmp_manifest.name,
-                            override_config=transcribe_cfg,
-                        )
+                        log(f"  Calling model.transcribe()...")
+                        try:
+                            predicted_text = model.transcribe(
+                                tmp_manifest.name,
+                                override_config=transcribe_cfg,
+                            )
+                            log(f"  transcribe() returned. Type: {type(predicted_text)}, Length: {len(predicted_text) if isinstance(predicted_text, list) else 'N/A'}")
+
+                            if isinstance(predicted_text, list) and len(predicted_text) > 0:
+                                log(f"  First result type: {type(predicted_text[0])}")
+                                log(f"  First result attributes: {dir(predicted_text[0])}")
+                                if hasattr(predicted_text[0], 'text'):
+                                    log(f"  Has .text attribute")
+                                else:
+                                    log(f"  WARNING: No .text attribute found")
+
+                        except Exception as e:
+                            log(f"  ERROR in model.transcribe(): {type(e).__name__}: {str(e)}")
+                            import traceback
+                            log(f"  Traceback:\n{traceback.format_exc()}")
+                            raise
 
                         # Extract transcription from result
                         # Returns list of Hypothesis objects with .text attribute
+                        log(f"  Extracting text from result...")
                         hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
+                        log(f"  Extracted text length: {len(hyp_text)} chars")
 
                 transcribe_time = time.time() - transcribe_start
                 log(f"  Transcription complete: {len(hyp_text)} chars in {transcribe_time:.1f}s")
