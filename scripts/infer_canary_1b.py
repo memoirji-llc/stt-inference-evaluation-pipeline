@@ -102,147 +102,225 @@ def run(cfg):
         blob_prefix = cfg["input"].get("blob_prefix", "vhp")
 
         df = data_loader.load_vhp_dataset(parquet_path, sample_size=sample_size)
-        files = df.to_dict("records")
-
-        # Initialize Azure blob client
-        blob_service = azure_utils.get_blob_service_client()
-        container_client = blob_service.get_container_client(os.getenv("AZURE_CONTAINER_NAME"))
-
-        log(f"Loaded {len(files)} files from {parquet_path}")
-        log(f"Will process audio from Azure blob storage")
-
+        manifest = data_loader.prepare_inference_manifest(df, blob_prefix=blob_prefix)
+        log(f"Prepared manifest with {len(manifest)} items from Azure blob")
     else:
-        # Load from local filesystem
-        pattern = cfg["input"]["pattern"]
-        filepaths = glob.glob(pattern, recursive=True)
-        files = [{"local_path": str(p)} for p in filepaths]
-        log(f"Found {len(files)} local files matching pattern: {pattern}")
+        # Local files via glob
+        audio_glob = cfg["input"]["audio_glob"]
+        file_paths = glob.glob(audio_glob)
+        manifest = [
+            {"file_id": i, "blob_path": p, "collection_number": Path(p).stem, "ground_truth": None, "title": ""}
+            for i, p in enumerate(file_paths)
+        ]
+        log(f"Found {len(manifest)} local files")
 
     # Initialize results storage
     results = []
     total_audio_duration = 0.0  # Track total audio duration across all files
 
     # Process each file
-    log(f"Starting inference on {len(files)} files...")
-    for idx, file_info in enumerate(tqdm(files, desc="Processing files")):
-        file_id = file_info.get("file_id", idx)
+    log(f"Starting inference on {len(manifest)} files...")
+    hyp_path = out_dir / "hyp_canary1b.txt"
 
-        try:
-            # Download/load audio
-            if source_type == "azure_blob":
-                blob_path = file_info["blob_path"]
-                collection_number = file_info.get("collection_number", "unknown")
-                log(f"\n[{idx+1}/{len(files)}] Processing file_id={file_id}, collection={collection_number}")
-                log(f"  Blob path: {blob_path}")
+    with open(hyp_path, "w") as hout:
+        for item in tqdm(manifest, desc="Transcribing"):
+            file_id = item["file_id"]
+            collection_num = item["collection_number"]
 
-                # Download from Azure to temp file
-                with NamedTemporaryFile(suffix=Path(blob_path).suffix, delete=True) as tmp_audio:
-                    blob_client = container_client.get_blob_client(blob_path)
-                    download_stream = blob_client.download_blob()
-                    tmp_audio.write(download_stream.readall())
-                    tmp_audio.flush()
-                    audio_path = tmp_audio.name
-
-                    # Load audio
-                    wave, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
-
+            # Handle both old format (single blob_path) and new format (blob_path_candidates list)
+            if "blob_path_candidates" in item:
+                source_paths = item["blob_path_candidates"]
+            elif "blob_path" in item:
+                source_paths = [item["blob_path"]]
             else:
-                # Load from local path
-                audio_path = file_info["local_path"]
-                log(f"\n[{idx+1}/{len(files)}] Processing: {audio_path}")
-                wave, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
+                log(f"\n[{file_id}] ERROR: No blob path found in manifest")
+                continue
 
-            # Optionally slice to specified duration
-            if duration_sec:
-                max_samples = int(duration_sec * sample_rate)
-                if len(wave) > max_samples:
-                    wave = wave[:max_samples]
-                    log(f"  Sliced audio to {duration_sec}s")
+            # Log attempt
+            log(f"\n[{file_id}] Processing: {collection_num}")
 
-            actual_duration = len(wave) / sample_rate
-            total_audio_duration += actual_duration
-            log(f"  Audio duration: {actual_duration:.1f}s")
+            try:
+                # Load audio
+                start_time = time.time()
 
-            # Check GPU memory if available
-            if device == "cuda" and torch.cuda.is_available():
-                gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-                gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
-                gpu_mem_free = gpu_mem_total - gpu_mem_allocated
-                log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
+                # Download and check file size if Azure blob
+                if source_type == "azure_blob":
+                    # Try each candidate path until one succeeds
+                    audio_bytes = None
+                    successful_path = None
 
-            # Transcribe using Canary-1B's native transcribe() method
-            log(f"  Starting transcription...")
-            transcribe_start = time.time()
+                    for source_path in source_paths:
+                        try:
+                            print(f"  Trying: {source_path}")
+                            audio_bytes = azure_utils.download_blob_to_memory(source_path)
+                            successful_path = source_path
+                            print(f"  ✓ Found: {source_path}")
+                            break
+                        except Exception as e:
+                            print(f"    × Not found: {source_path}")
+                            continue
 
-            with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-                sf.write(tmp.name, wave, sample_rate)
+                    if audio_bytes is None:
+                        raise FileNotFoundError(f"None of the candidate paths exist: {source_paths}")
+                    file_size_mb = len(audio_bytes) / (1024 * 1024)
+                    log(f"  Downloaded: {file_size_mb:.2f} MB")
 
-                # Canary-1B transcription (pure ASR, no prompting)
-                # Default behavior: English ASR with punctuation
-                predicted_text = model.transcribe(
-                    paths2audio_files=[tmp.name],
-                    batch_size=1,
-                )
+                    # Check if file looks valid
+                    if len(audio_bytes) < 100:
+                        raise ValueError(f"File too small ({len(audio_bytes)} bytes) - likely empty or corrupted")
 
-                # Extract transcription from result
-                hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
+                    # Use pydub to handle both MP3 and MP4 (video) files
+                    import io
+                    log(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
 
-            transcribe_time = time.time() - transcribe_start
-            log(f"  Transcription complete: {len(hyp_text)} chars in {transcribe_time:.1f}s")
-            log(f"  Preview: {hyp_text[:100]}...")
+                    # Load with pydub (handles MP3, MP4, M4A, WAV, etc.)
+                    audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
 
-            # Clear GPU cache
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                    # Normalize: convert to mono, resample to target rate
+                    audio_segment = audio_segment.set_channels(1)  # Mono
+                    audio_segment = audio_segment.set_frame_rate(sample_rate)  # 16kHz
 
-            # Save per-file output if requested
-            if cfg["output"].get("save_per_file", False):
-                hypothesis_path = out_dir / f"{file_id:05d}_hypothesis.txt"
-                hypothesis_path.write_text(hyp_text, encoding='utf-8')
+                    # Trim to desired duration if specified
+                    if duration_sec is not None:
+                        duration_ms = duration_sec * 1000
+                        audio_segment = audio_segment[:duration_ms]
 
-            # Store result
-            result = {
-                "file_id": file_id,
-                "collection_number": file_info.get("collection_number"),
-                "blob_path": file_info.get("blob_path"),
-                "hypothesis": hyp_text,
-                "duration_sec": actual_duration,
-                "processing_time_sec": transcribe_time,
-                "status": "success",
-                "error_message": None
-            }
+                    # Convert to numpy array
+                    samples = np.array(audio_segment.get_array_of_samples())
+                    # Normalize to float32 [-1, 1]
+                    if audio_segment.sample_width == 2:  # 16-bit
+                        wave = samples.astype(np.float32) / 32768.0
+                    elif audio_segment.sample_width == 4:  # 32-bit
+                        wave = samples.astype(np.float32) / 2147483648.0
+                    else:
+                        wave = samples.astype(np.float32)
 
-            if use_wandb:
-                wandb.log({
-                    "file_processed": file_id,
-                    "duration": actual_duration,
-                    "processing_time": transcribe_time,
-                    "speedup": actual_duration / transcribe_time if transcribe_time > 0 else 0,
-                    "status": "success"
-                })
+                    actual_duration = len(wave) / sample_rate
+                else:
+                    # Load from local file (also use pydub for consistency)
+                    # For local files, just use the first path (should only be one)
+                    source_path = source_paths[0]
+                    log(f"  File: {source_path}")
+                    log(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
 
-        except Exception as e:
-            log(f"  ERROR processing file_id={file_id}: {str(e)}")
+                    # Load with pydub (handles MP3, MP4, M4A, WAV, etc.)
+                    audio_segment = AudioSegment.from_file(source_path)
 
-            result = {
-                "file_id": file_id,
-                "collection_number": file_info.get("collection_number"),
-                "blob_path": file_info.get("blob_path"),
-                "hypothesis": None,
-                "duration_sec": 0,
-                "processing_time_sec": 0,
-                "status": f"failed: {type(e).__name__}",
-                "error_message": str(e)
-            }
+                    # Normalize: convert to mono, resample to target rate
+                    audio_segment = audio_segment.set_channels(1)  # Mono
+                    audio_segment = audio_segment.set_frame_rate(sample_rate)  # 16kHz
 
-            if use_wandb:
-                wandb.log({
-                    "file_processed": file_id,
-                    "status": "failed",
-                    "error": str(e)
-                })
+                    # Trim to desired duration if specified
+                    if duration_sec is not None:
+                        duration_ms = duration_sec * 1000
+                        audio_segment = audio_segment[:duration_ms]
 
-        results.append(result)
+                    # Convert to numpy array
+                    samples = np.array(audio_segment.get_array_of_samples())
+                    # Normalize to float32 [-1, 1]
+                    if audio_segment.sample_width == 2:  # 16-bit
+                        wave = samples.astype(np.float32) / 32768.0
+                    elif audio_segment.sample_width == 4:  # 32-bit
+                        wave = samples.astype(np.float32) / 2147483648.0
+                    else:
+                        wave = samples.astype(np.float32)
+
+                    actual_duration = len(wave) / sample_rate
+
+                total_audio_duration += actual_duration
+                log(f"  Audio duration: {actual_duration:.1f}s")
+
+                # Check GPU memory if available
+                if device == "cuda" and torch.cuda.is_available():
+                    gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+                    gpu_mem_free = gpu_mem_total - gpu_mem_allocated
+                    log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
+
+                # Transcribe using Canary-1B's native transcribe() method
+                log(f"  Starting transcription...")
+                transcribe_start = time.time()
+
+                with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+                    sf.write(tmp.name, wave, sample_rate)
+
+                    # Canary-1B transcription (pure ASR, no prompting)
+                    # Default behavior: English ASR with punctuation
+                    predicted_text = model.transcribe(
+                        paths2audio_files=[tmp.name],
+                        batch_size=1,
+                    )
+
+                    # Extract transcription from result
+                    hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
+
+                transcribe_time = time.time() - transcribe_start
+                log(f"  Transcription complete: {len(hyp_text)} chars in {transcribe_time:.1f}s")
+                log(f"  Preview: {hyp_text[:100]}...")
+
+                # Write to combined hypothesis file
+                hout.write(hyp_text + "\n")
+                hout.flush()
+
+                # Clear GPU cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                # Save per-file output if requested
+                if cfg["output"].get("save_per_file", False):
+                    hypothesis_path = out_dir / f"hyp_{file_id}.txt"
+                    hypothesis_path.write_text(hyp_text, encoding='utf-8')
+
+                # Store result
+                ground_truth = item.get("ground_truth", None)
+                result = {
+                    "file_id": file_id,
+                    "collection_number": collection_num,
+                    "blob_path": successful_path if source_type == "azure_blob" else source_path,
+                    "hypothesis": hyp_text,
+                    "ground_truth": ground_truth,
+                    "title": item.get("title", ""),
+                    "duration_sec": actual_duration,
+                    "processing_time_sec": transcribe_time,
+                    "model_name": "canary-1b",
+                    "status": "success",
+                    "error_message": None
+                }
+
+                if use_wandb:
+                    wandb.log({
+                        "file_processed": file_id,
+                        "duration": actual_duration,
+                        "processing_time": transcribe_time,
+                        "speedup": actual_duration / transcribe_time if transcribe_time > 0 else 0,
+                        "status": "success"
+                    })
+
+            except Exception as e:
+                log(f"  ERROR processing file_id={file_id}: {str(e)}")
+
+                result = {
+                    "file_id": file_id,
+                    "collection_number": collection_num,
+                    "blob_path": item.get("blob_path", ""),
+                    "hypothesis": None,
+                    "ground_truth": item.get("ground_truth", None),
+                    "title": item.get("title", ""),
+                    "duration_sec": 0,
+                    "processing_time_sec": 0,
+                    "model_name": "canary-1b",
+                    "status": f"failed: {type(e).__name__}",
+                    "error_message": str(e)
+                }
+
+                if use_wandb:
+                    wandb.log({
+                        "file_processed": file_id,
+                        "status": "failed",
+                        "error": str(e)
+                    })
+
+            results.append(result)
 
     # Save results
     results_df = pd.DataFrame(results)
@@ -283,8 +361,9 @@ def run(cfg):
         })
 
     return {
-        "results_path": results_path,
-        "output_dir": out_dir,
+        "hyp_path": str(hyp_path),
+        "results_path": str(results_path),
+        "output_dir": str(out_dir),
         "summary": {
             "total_files": len(results),
             "successful": successful_count,
@@ -292,3 +371,16 @@ def run(cfg):
             "avg_speedup": avg_speedup
         }
     }
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python infer_canary_1b.py <config.yaml>")
+        sys.exit(1)
+
+    config_path = sys.argv[1]
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    run(cfg)
