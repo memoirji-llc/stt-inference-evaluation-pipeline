@@ -1,0 +1,37 @@
+# Configuration for NVIDIA Canary-1B (pure ASR model)
+# Sample 10 files, full audio without chunking
+# Canary-1B has timestamp support and lower memory footprint than Canary-Qwen
+# Expected runtime: ~5-10 minutes for 10 samples on T4 GPU
+
+experiment_id: "vhp-pre2010-canary-1b-sample10-full-gpu"
+
+# Model configuration
+model:
+  name: "canary-1b"
+  dir: "nvidia/canary-1b"  # HuggingFace model ID
+  device: "cuda"  # GPU required for fast processing
+  batch_size: 1  # Process one file at a time
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10  # Sample 10 files for testing
+  duration_sec: null  # Process full audio
+  sample_rate: 16000  # Canary expects 16kHz
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-canary-1b-sample10-full-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["canary-1b", "gpu", "sample10", "vhp-pre2010", "full-audio", "pure-asr"]
