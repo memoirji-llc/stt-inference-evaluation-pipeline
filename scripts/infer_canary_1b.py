@@ -89,6 +89,13 @@ def run(cfg):
     else:
         log("Model loaded on CPU")
 
+    # Get transcribe config and set up for inference
+    transcribe_cfg = model.get_transcribe_config()
+    transcribe_cfg.batch_size = cfg["model"].get("batch_size", 1)
+    transcribe_cfg.return_hypotheses = True  # Return hypothesis objects
+    transcribe_cfg.lang_field = "target_lang"  # Field name in manifest for language
+    log(f"Transcribe config: batch_size={transcribe_cfg.batch_size}, lang_field={transcribe_cfg.lang_field}")
+
     # Determine input source
     source_type = cfg["input"].get("source", "local")
     duration_sec = cfg["input"].get("duration_sec")  # None = full duration
@@ -260,10 +267,10 @@ def run(cfg):
                         tmp_manifest.write(json.dumps(manifest_entry) + "\n")
                         tmp_manifest.flush()
 
-                        # Transcribe using manifest file
+                        # Transcribe using manifest file with override config
                         predicted_text = model.transcribe(
                             tmp_manifest.name,
-                            batch_size=1,
+                            override_config=transcribe_cfg,
                         )
 
                         # Extract transcription from result
