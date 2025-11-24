@@ -241,19 +241,34 @@ def run(cfg):
                 log(f"  Starting transcription...")
                 transcribe_start = time.time()
 
-                with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-                    sf.write(tmp.name, wave, sample_rate)
+                with NamedTemporaryFile(suffix=".wav", delete=True) as tmp_wav:
+                    sf.write(tmp_wav.name, wave, sample_rate)
 
-                    # Canary-1B transcription (pure ASR, no prompting)
-                    # Default behavior: English ASR with punctuation
-                    # Note: transcribe() returns a list of strings (not objects)
-                    predicted_text = model.transcribe(
-                        audio=[tmp.name],
-                        batch_size=1,
-                    )
+                    # Canary-1B requires a manifest file with task/language metadata
+                    # Create temporary manifest for this audio file
+                    import json
+                    with NamedTemporaryFile(mode='w', suffix=".json", delete=True) as tmp_manifest:
+                        manifest_entry = {
+                            "audio_filepath": tmp_wav.name,
+                            "duration": actual_duration,
+                            "taskname": "asr",  # ASR (not translation)
+                            "source_lang": "en",  # English audio
+                            "target_lang": "en",  # English text
+                            "pnc": "yes",  # Enable punctuation and capitalization
+                            "answer": "na"  # Not used for inference
+                        }
+                        tmp_manifest.write(json.dumps(manifest_entry) + "\n")
+                        tmp_manifest.flush()
 
-                    # Extract transcription from result (returns list of strings)
-                    hyp_text = predicted_text[0] if isinstance(predicted_text, list) else str(predicted_text)
+                        # Transcribe using manifest file
+                        predicted_text = model.transcribe(
+                            tmp_manifest.name,
+                            batch_size=1,
+                        )
+
+                        # Extract transcription from result
+                        # Returns list of Hypothesis objects with .text attribute
+                        hyp_text = predicted_text[0].text if hasattr(predicted_text[0], 'text') else str(predicted_text[0])
 
                 transcribe_time = time.time() - transcribe_start
                 log(f"  Transcription complete: {len(hyp_text)} chars in {transcribe_time:.1f}s")
