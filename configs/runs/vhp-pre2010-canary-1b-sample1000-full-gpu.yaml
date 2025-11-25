@@ -1,0 +1,38 @@
+# Configuration for NVIDIA Canary-1B-v2 (pure ASR model, 978M params)
+# Sample 1000 files, full audio without chunking
+# v2 improvements: 25 languages, 8.40% WER on Fleurs-25, trained on 1.7M hours
+# Expected runtime: ~15-25 hours for 1000 samples on T4 GPU (slower than Parakeet but more stable)
+# Note: Canary-1B-v2 is larger than Parakeet (978M vs 600M) but should handle long audio better
+
+experiment_id: "vhp-pre2010-canary-1b-v2-sample1000-full-gpu"
+
+# Model configuration
+model:
+  name: "canary-1b-v2"
+  dir: "nvidia/canary-1b-v2"  # HuggingFace model ID (v2 is newer/better)
+  device: "cuda"  # GPU required for fast processing
+  batch_size: 1  # Process one file at a time (critical for memory management)
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 1000  # Full benchmark with 1000 files
+  duration_sec: null  # Process full audio (no documented length limits for Canary-1B)
+  sample_rate: 16000  # Canary expects 16kHz
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-canary-1b-v2-sample1000-full-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["canary-1b-v2", "gpu", "sample1000", "vhp-pre2010", "full-audio", "pure-asr", "978M-params", "production-run"]
