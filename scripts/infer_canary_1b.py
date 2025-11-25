@@ -287,8 +287,14 @@ def run(cfg):
                 hout.flush()
 
                 # Clear GPU cache
+                # CRITICAL: Must disable CUDA graphs before clearing cache to avoid illegal memory access
+                # See: https://github.com/NVIDIA-NeMo/NeMo/issues/14727
                 if torch.cuda.is_available():
+                    model.disable_cuda_graphs()  # Disable CUDA graphs first
                     torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
+                    model.enable_cuda_graphs()  # Re-enable for next file
 
                 # Save per-file output if requested
                 if cfg["output"].get("save_per_file", False):
