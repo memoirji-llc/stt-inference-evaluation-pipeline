@@ -21,6 +21,12 @@ from tqdm import tqdm
 from pydub import AudioSegment
 # models
 import torch
+
+# Enable CUDA synchronous mode for better error reporting (helps debug illegal memory access)
+# WARNING: This makes GPU operations slower but gives accurate error locations
+# Comment out for production runs once debugging is complete
+# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 import nemo.collections.asr as nemo_asr
 # experiment tracking
 import wandb
@@ -364,6 +370,17 @@ def run(cfg):
                     log(f"    → This file may be corrupted, empty, or in an unsupported format")
                 elif "BlobNotFound" in error_type or "ResourceNotFoundError" in error_type:
                     log(f"    → Blob does not exist in Azure storage")
+                elif "AcceleratorError" in error_type or "illegal memory access" in error_msg:
+                    log(f"    → CRITICAL: GPU memory corruption detected!")
+                    log(f"    → This usually happens after repeated OOM errors")
+                    log(f"    → Recommendation: Restart the GPU/instance")
+                    log(f"    → Attempting GPU cache clear and continuing...")
+                    # Try to recover
+                    if device == "cuda" and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        import gc
+                        gc.collect()
                 elif len(error_msg) < 200:
                     # Short error, show full traceback for debugging
                     log(f"    Traceback: {traceback.format_exc()}")
