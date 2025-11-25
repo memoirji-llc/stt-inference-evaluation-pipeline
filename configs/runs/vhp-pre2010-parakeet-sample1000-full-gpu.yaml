@@ -19,8 +19,8 @@ model:
   # Files >30 min will fail gracefully with OOM (captured in status column)
   use_local_attention: true  # Enables O(n) memory scaling vs O(n²)
   att_context_size: [256, 256]  # 13-sec context window - best quality for T4
-  enable_subsampling_chunking: true  # Enable conv layer optimization (limited benefit on T4)
-  subsampling_chunking_factor: 1  # Auto-select chunk size
+  enable_subsampling_chunking: false  # DISABLED - causes GPU memory corruption on T4
+  subsampling_chunking_factor: 1  # (not used when disabled)
 
 # Input configuration
 input:
