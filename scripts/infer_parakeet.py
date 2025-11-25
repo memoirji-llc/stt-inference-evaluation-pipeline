@@ -268,10 +268,14 @@ def run(cfg):
                     log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
                 # Clear GPU cache before transcription (prevent memory accumulation)
+                # CRITICAL: Must disable CUDA graphs before clearing cache to avoid illegal memory access
+                # See: https://github.com/NVIDIA-NeMo/NeMo/issues/14727
                 if device == "cuda" and torch.cuda.is_available():
+                    model.disable_cuda_graphs()  # Disable CUDA graphs first
                     torch.cuda.empty_cache()
                     import gc
                     gc.collect()
+                    model.enable_cuda_graphs()  # Re-enable for next file
 
                 # Transcribe
                 log(f"  Starting transcription...")
@@ -372,15 +376,22 @@ def run(cfg):
                     log(f"    → Blob does not exist in Azure storage")
                 elif "AcceleratorError" in error_type or "illegal memory access" in error_msg:
                     log(f"    → CRITICAL: GPU memory corruption detected!")
-                    log(f"    → This usually happens after repeated OOM errors")
-                    log(f"    → Recommendation: Restart the GPU/instance")
-                    log(f"    → Attempting GPU cache clear and continuing...")
-                    # Try to recover
+                    log(f"    → This can happen from repeated OOM errors OR improper CUDA graph cleanup")
+                    log(f"    → Attempting GPU reset with proper CUDA graph handling...")
+                    # Try to recover - MUST disable CUDA graphs first
+                    # See: https://github.com/NVIDIA-NeMo/NeMo/issues/14727
                     if device == "cuda" and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-                        import gc
-                        gc.collect()
+                        try:
+                            model.disable_cuda_graphs()
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                            import gc
+                            gc.collect()
+                            model.enable_cuda_graphs()
+                            log(f"    → GPU reset complete, continuing...")
+                        except Exception as recovery_error:
+                            log(f"    → Recovery failed: {recovery_error}")
+                            log(f"    → Recommendation: Restart the GPU/instance if errors persist")
                 elif len(error_msg) < 200:
                     # Short error, show full traceback for debugging
                     log(f"    Traceback: {traceback.format_exc()}")
