@@ -1,0 +1,46 @@
+# Configuration for NVIDIA Parakeet-TDT-0.6B-v3 on RunPod RTX A6000
+# BEAST MODE: Maximum settings for 48GB VRAM GPU
+# Full 1000 sample benchmark run
+# Model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+# Performance: 55.75x realtime on 10-sample test (9.49 hours audio in 10.6 min)
+# Expected runtime: ~2-3 hours for 1000 samples on A6000 GPU
+
+experiment_id: "vhp-pre2010-parakeet-sample1000-runpod-a6000"
+
+# Model configuration
+model:
+  name: "parakeet-tdt-0.6b-v3"
+  dir: "nvidia/parakeet-tdt-0.6b-v3"  # HuggingFace model ID
+  device: "cuda"  # GPU required for fast processing
+  enable_timestamps: false  # Set true for word/segment/char timestamps
+
+  # BEAST MODE for RTX A6000 (48GB VRAM) - Proven on 10-sample test
+  # Handled 115 min file with only 2.6GB GPU memory used
+  use_local_attention: true
+  att_context_size: [512, 512]  # 2x larger context than T4 config
+  enable_subsampling_chunking: true
+  subsampling_chunking_factor: 1
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 1000  # Full benchmark
+  duration_sec: null  # Process FULL audio
+  sample_rate: 16000
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-parakeet-sample1000-runpod-a6000"
+  save_per_file: true
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["parakeet-tdt-0.6b-v3", "runpod", "a6000", "beast-mode", "sample1000", "vhp-pre2010", "full-audio", "benchmark"]
