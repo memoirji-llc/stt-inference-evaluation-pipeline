@@ -117,3 +117,9 @@ scp amia-gpu:~/projects/amia2025-stt-benchmarking/outputs/EXPERIMENT_NAME/evalua
 # Download full output directory
 rsync -avz --progress amia-gpu:~/projects/amia2025-stt-benchmarking/outputs/EXPERIMENT_NAME/ ./outputs/EXPERIMENT_NAME/
 ```
+
+
+!! important when setting up new "pod" (vm): 
+- on runpod, when specify public key, take the one from local - theres a key already (~/.ssh/id_ed25519), then they will use that later when we try to auth
+- mind the uv sync since some packages are not included due to machine diff- torch, nemo, 
+- need to install `screen`, htop
