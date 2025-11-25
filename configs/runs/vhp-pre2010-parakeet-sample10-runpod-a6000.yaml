@@ -1,0 +1,57 @@
+# Configuration for NVIDIA Parakeet-TDT-0.6B-v3 on RunPod RTX A6000
+# BEAST MODE: Maximum settings for 48GB VRAM GPU
+# Sample 10 files, full audio without manual Python chunking
+# Model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+# Performance: RTFx 3332.74 (4.4x faster than Canary-1B), 6.32% WER (English)
+# Expected runtime: ~3-5 minutes for 10 samples on A6000 GPU
+
+experiment_id: "vhp-pre2010-parakeet-sample10-runpod-a6000"
+
+# Model configuration
+model:
+  name: "parakeet-tdt-0.6b-v3"
+  dir: "nvidia/parakeet-tdt-0.6b-v3"  # HuggingFace model ID
+  device: "cuda"  # GPU required for fast processing
+  enable_timestamps: false  # Set true for word/segment/char timestamps
+
+  # BEAST MODE for RTX A6000 (48GB VRAM) - Exploit full capabilities
+  # Goal: Handle multi-hour audio files without Python chunking
+  # Context: T4 (14GB) fails at ~30 min; A6000 (48GB) should handle 2-3+ hours
+
+  # Local attention: Converts O(n²) to O(n) memory scaling
+  use_local_attention: true  # Essential for long audio
+
+  # MAXIMUM context window (larger = better quality, more memory)
+  # 512 frames = ~25 sec context (vs T4's 256 = 13 sec)
+  # Trade-off: 2x memory usage for attention vs T4, but we have 3.5x more VRAM
+  att_context_size: [512, 512]  # [left, right] context in frames
+
+  # Subsampling chunking: Reduces conv layer memory usage
+  # NOTE: This was DISABLED on T4 due to GPU memory corruption bugs
+  # Testing on A6000: Different architecture may not have same issues
+  enable_subsampling_chunking: true  # Test if Ampere handles this better
+  subsampling_chunking_factor: 1  # 1=auto-select optimal chunk size
+
+# Input configuration
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010.parquet"
+  blob_prefix: "loc_vhp"
+  sample_size: 10  # Test with 10 samples first
+  duration_sec: null  # Process FULL audio - unleash the beast!
+  sample_rate: 16000  # Parakeet expects 16kHz
+
+# Output configuration
+output:
+  dir: "outputs/vhp-pre2010-parakeet-sample10-runpod-a6000"
+  save_per_file: true  # Save individual hypothesis files
+
+# Evaluation configuration
+evaluation:
+  use_whisper_normalizer: true  # Use Whisper text normalizer for WER calculation
+
+# Wandb configuration
+wandb:
+  project: amia-stt
+  group: open-source-models
+  tags: ["parakeet-tdt-0.6b-v3", "runpod", "a6000", "beast-mode", "sample10", "vhp-pre2010", "full-audio", "max-context", "48GB-vram"]

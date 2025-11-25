@@ -268,14 +268,10 @@ def run(cfg):
                     log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
                 # Clear GPU cache before transcription (prevent memory accumulation)
-                # CRITICAL: Must disable CUDA graphs before clearing cache to avoid illegal memory access
-                # See: https://github.com/NVIDIA-NeMo/NeMo/issues/14727
                 if device == "cuda" and torch.cuda.is_available():
-                    model.disable_cuda_graphs()  # Disable CUDA graphs first
                     torch.cuda.empty_cache()
                     import gc
                     gc.collect()
-                    model.enable_cuda_graphs()  # Re-enable for next file
 
                 # Transcribe
                 log(f"  Starting transcription...")
