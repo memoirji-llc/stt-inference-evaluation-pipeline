@@ -121,6 +121,11 @@ def segment_audio_with_ctc(
     asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name)
     asr_model.eval()
 
+    # Clear CUDA cache before processing
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"  Cleared CUDA cache before processing")
+
     # Load audio to check duration
     print(f"Loading audio: {audio_path}")
     audio, sr = librosa.load(audio_path, sr=sample_rate)
@@ -129,8 +134,11 @@ def segment_audio_with_ctc(
     print(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} minutes)")
     print(f"  Audio array size: {audio_size_mb:.1f}MB ({len(audio)} samples)")
 
-    # Get CTC logits from model (following NeMo's approach)
+    # Get CTC logits from model
+    # For long audio, chunk to avoid GPU OOM, then concatenate logits
     print(f"  Computing CTC logits...")
+
+    # Try processing entire file first, fall back to chunking if OOM
     try:
         with torch.no_grad():
             hypotheses = asr_model.transcribe(
@@ -153,12 +161,79 @@ def segment_audio_with_ctc(
 
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
-            print(f"  ERROR: GPU OOM during transcription!")
-            print(f"  Audio duration: {audio_duration:.1f}s is too long for this GPU")
-            print(f"  Suggestion: Use a smaller model or split audio file manually before processing")
+            print(f"  GPU OOM detected - falling back to chunked processing")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            return []
+
+            # Chunk processing for very long audio
+            # Adjust chunk duration based on audio length
+            if audio_duration > 1800:  # 30 minutes
+                chunk_duration = 60.0  # 1-minute chunks
+            else:
+                chunk_duration = 120.0  # 2-minute chunks
+
+            print(f"  Processing in {chunk_duration}s chunks...")
+
+            chunk_samples = int(chunk_duration * sample_rate)
+            num_chunks = int(np.ceil(len(audio) / chunk_samples))
+
+            all_logits = []
+
+            for i in range(num_chunks):
+                start_idx = i * chunk_samples
+                end_idx = min((i + 1) * chunk_samples, len(audio))
+                audio_chunk = audio[start_idx:end_idx]
+                chunk_duration_actual = len(audio_chunk) / sample_rate
+
+                print(f"    Chunk {i+1}/{num_chunks}: {start_idx/sample_rate:.1f}s - {end_idx/sample_rate:.1f}s ({chunk_duration_actual:.1f}s)")
+
+                # Save chunk to temp file
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                    temp_chunk_path = tmp_file.name
+                    sf.write(temp_chunk_path, audio_chunk, sample_rate)
+
+                try:
+                    with torch.no_grad():
+                        hypotheses = asr_model.transcribe(
+                            audio=[temp_chunk_path],
+                            batch_size=1,
+                            return_hypotheses=True
+                        )
+
+                        chunk_logits = hypotheses[0].alignments
+                        print(f"      Chunk {i+1} logits shape: {chunk_logits.shape}")
+
+                        # Move blank column for this chunk
+                        blank_col = chunk_logits[:, -1].reshape((chunk_logits.shape[0], 1))
+                        chunk_logits = np.concatenate((blank_col, chunk_logits[:, :-1]), axis=1)
+
+                        all_logits.append(chunk_logits)
+
+                    # Clean up temp file
+                    import os
+                    os.unlink(temp_chunk_path)
+
+                    # Clear CUDA cache after each chunk
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                except Exception as chunk_err:
+                    print(f"      ERROR: Chunk {i+1} failed: {chunk_err}")
+                    import os
+                    if os.path.exists(temp_chunk_path):
+                        os.unlink(temp_chunk_path)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
+
+            if not all_logits:
+                print("  ERROR: All chunks failed")
+                return []
+
+            # Concatenate all chunk logits
+            logits = np.concatenate(all_logits, axis=0)
+            print(f"  Combined logits shape: {logits.shape}")
         else:
             raise
 
@@ -492,6 +567,12 @@ def process_single_vhp_row(
     for path in segment_paths:
         if os.path.exists(path):
             os.unlink(path)
+
+    # Clear CUDA cache after processing this file to free memory for next file
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"  Cleared CUDA cache after processing file")
 
     return output_rows
 
