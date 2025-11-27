@@ -261,21 +261,37 @@ def segment_audio_with_ctc(
     # CTC segmentation configuration
     config = CtcSegmentationParameters()
 
-    # Convert vocabulary to regular Python list and add blank symbol at position 0
-    # Following NeMo's approach
-    vocabulary = asr_model.decoder.vocabulary
-    if hasattr(vocabulary, '__iter__') and not isinstance(vocabulary, list):
-        vocabulary = list(vocabulary)
+    # Extract vocabulary from ASR model (following NeMo's approach)
+    # Check if BPE or character-based model
+    if hasattr(asr_model, 'tokenizer'):  # BPE-based model
+        vocabulary = asr_model.tokenizer.vocab
+        print(f"  Detected BPE-based model")
+    elif hasattr(asr_model.decoder, "vocabulary"):  # Character-based model
+        vocabulary = asr_model.cfg.decoder.vocabulary  # Use cfg to get the raw list
+        print(f"  Detected character-based model")
+    else:
+        raise ValueError("Unexpected model type. Vocabulary list not found.")
+
+    print(f"  Raw vocabulary type: {type(vocabulary)}")
+
+    # CRITICAL: Convert to regular Python list (force conversion from OmegaConf)
+    # Must use list() constructor to create a new Python list
+    vocabulary = list(vocabulary)
+
+    # Verify it's actually a list now
+    print(f"  Converted vocabulary type: {type(vocabulary)}")
+    print(f"  First 5 tokens: {vocabulary[:5] if len(vocabulary) >= 5 else vocabulary}")
 
     # Add blank symbol "ε" at the beginning (position 0)
     vocabulary = ["ε"] + vocabulary
 
+    # Assign to config - must be plain Python list
     config.char_list = vocabulary
     config.index_duration = index_duration  # Use calculated value, not hardcoded
     config.blank = 0  # Blank is at position 0 after moving the column
 
     print(f"  Vocabulary size (with blank): {len(config.char_list)} tokens")
-    print(f"  Vocabulary type: {type(config.char_list)}")
+    print(f"  Config char_list type: {type(config.char_list)}")
     print(f"  Blank token at position: {config.blank}")
 
     # Run CTC segmentation
