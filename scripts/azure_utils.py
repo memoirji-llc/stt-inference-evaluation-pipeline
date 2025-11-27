@@ -103,6 +103,23 @@ def blob_exists(blob_path: str, container: Optional[str] = None) -> bool:
         return False
 
 
+def upload_blob(blob_path: str, data: bytes, container: Optional[str] = None, overwrite: bool = True) -> None:
+    """
+    Upload bytes data to Azure blob storage.
+
+    Args:
+        blob_path: Path to blob (e.g., "loc_vhp/123/123_000.wav")
+        data: File contents as bytes
+        container: Container name (defaults to env AZURE_STORAGE_CONTAINER)
+        overwrite: Whether to overwrite existing blob (default True)
+    """
+    svc = make_blob_service()
+    container = container or os.environ["AZURE_STORAGE_CONTAINER"]
+
+    blob_client = svc.get_blob_client(container=container, blob=blob_path)
+    blob_client.upload_blob(data, overwrite=overwrite)
+
+
 def list_blobs(prefix: str, container: Optional[str] = None) -> list[str]:
     """
     List all blobs with a given prefix.
