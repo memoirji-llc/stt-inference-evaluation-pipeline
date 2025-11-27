@@ -111,7 +111,15 @@ def segment_audio_with_ctc(
     print(f"Loading audio: {audio_path}")
     audio, sr = librosa.load(audio_path, sr=sample_rate)
     audio_duration = len(audio) / sample_rate
-    print(f"  Audio duration: {audio_duration:.1f}s")
+    audio_size_mb = audio.nbytes / 1e6
+    print(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} minutes)")
+    print(f"  Audio array size: {audio_size_mb:.1f}MB ({len(audio)} samples)")
+
+    # Adjust chunk duration based on audio length
+    # For very long audio (>30 min), use smaller chunks to be safe
+    if audio_duration > 1800:  # 30 minutes
+        chunk_duration = 60.0  # 1-minute chunks for very long audio
+        print(f"  Very long audio detected - using smaller chunks of {chunk_duration}s")
 
     # Process audio in chunks to avoid OOM
     chunk_samples = int(chunk_duration * sample_rate)
@@ -126,15 +134,23 @@ def segment_audio_with_ctc(
         start_idx = i * chunk_samples
         end_idx = min((i + 1) * chunk_samples, len(audio))
         audio_chunk = audio[start_idx:end_idx]
+        chunk_duration_actual = len(audio_chunk) / sample_rate
 
-        print(f"    Chunk {i+1}/{num_chunks}: {start_idx/sample_rate:.1f}s - {end_idx/sample_rate:.1f}s")
+        print(f"    Chunk {i+1}/{num_chunks}: {start_idx/sample_rate:.1f}s - {end_idx/sample_rate:.1f}s (duration: {chunk_duration_actual:.1f}s)")
 
         # Save chunk to temp file (NeMo requires file path)
         temp_chunk_path = f"/tmp/audio_chunk_{i}.wav"
         sf.write(temp_chunk_path, audio_chunk, sample_rate)
 
+        # Log GPU memory before processing
+        if torch.cuda.is_available():
+            mem_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            mem_reserved_gb = torch.cuda.memory_reserved() / 1e9
+            print(f"      GPU memory before transcribe: {mem_allocated_gb:.2f}GB allocated, {mem_reserved_gb:.2f}GB reserved")
+
         try:
             # Get CTC logits using forward pass for better memory control
+            print(f"      Starting transcription of chunk {i+1}...")
             with torch.no_grad():
                 # Use NeMo's transcribe with return_hypotheses
                 hypotheses = asr_model.transcribe(
@@ -145,6 +161,7 @@ def segment_audio_with_ctc(
 
                 # Extract alignments (log probabilities)
                 chunk_logits = hypotheses[0].alignments  # Shape: (time_steps, num_classes)
+                print(f"      Chunk {i+1} logits shape: {chunk_logits.shape}")
                 all_logits.append(chunk_logits)
                 all_logit_lengths.append(chunk_logits.shape[0])
 
@@ -155,12 +172,20 @@ def segment_audio_with_ctc(
             # Clear CUDA cache after each chunk
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                mem_allocated_gb = torch.cuda.memory_allocated() / 1e9
+                mem_reserved_gb = torch.cuda.memory_reserved() / 1e9
+                print(f"      GPU memory after chunk {i+1}: {mem_allocated_gb:.2f}GB allocated, {mem_reserved_gb:.2f}GB reserved")
 
         except Exception as e:
-            print(f"      Warning: Chunk {i} failed: {e}")
+            print(f"      ERROR: Chunk {i+1} failed!")
+            print(f"      Exception type: {type(e).__name__}")
+            print(f"      Exception message: {str(e)[:200]}")
             import os
             if os.path.exists(temp_chunk_path):
                 os.unlink(temp_chunk_path)
+            # Clear cache even on failure
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             # Continue with remaining chunks
             continue
 
