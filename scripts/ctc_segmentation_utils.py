@@ -26,7 +26,7 @@ from pydub import AudioSegment
 # NeMo imports
 try:
     import nemo.collections.asr as nemo_asr
-    from ctc_segmentation import ctc_segmentation, CtcSegmentationParameters
+    from ctc_segmentation import ctc_segmentation, CtcSegmentationParameters, prepare_text
 except ImportError as e:
     warnings.warn(f"NeMo/CTC-segmentation not installed: {e}")
 
@@ -100,13 +100,17 @@ def segment_audio_with_ctc(
     asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name)
     asr_model.eval()
 
-    # Load and resample audio
-    print(f"Loading audio: {audio_path}")
-    audio, sr = librosa.load(audio_path, sr=sample_rate)
-
-    # Get CTC logits from model
+    # Get CTC logits from model using return_hypotheses
     print("Computing CTC logits...")
-    logits = asr_model.transcribe([audio_path], logprobs=True)[0]
+    hypotheses = asr_model.transcribe(
+        audio=[audio_path],
+        batch_size=1,
+        return_hypotheses=True
+    )
+
+    # Extract alignments (log probabilities) from hypothesis
+    logits = hypotheses[0].alignments  # Shape: (time_steps, num_classes)
+    print(f"Logits shape: {logits.shape}")
 
     # Prepare text for alignment (join sentences with space)
     text = " ".join(transcript_sentences)
@@ -114,6 +118,7 @@ def segment_audio_with_ctc(
     # CTC segmentation configuration
     config = CtcSegmentationParameters()
     config.char_list = asr_model.decoder.vocabulary  # Model's character set
+    config.index_duration = 0.04  # 40ms per frame for Conformer CTC models
 
     # Run CTC segmentation
     print("Running CTC segmentation...")
