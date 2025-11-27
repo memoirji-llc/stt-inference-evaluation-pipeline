@@ -296,22 +296,48 @@ def segment_audio_with_ctc(
 
     # Run CTC segmentation
     print("  Running CTC segmentation...")
+
+    # DETAILED LOGGING before calling prepare_text
+    print(f"  DEBUG: About to call prepare_text()")
+    print(f"  DEBUG: config.char_list type = {type(config.char_list)}")
+    print(f"  DEBUG: config.char_list is list? {isinstance(config.char_list, list)}")
+    print(f"  DEBUG: config.char_list length = {len(config.char_list)}")
+    if len(config.char_list) > 0:
+        print(f"  DEBUG: config.char_list[0] type = {type(config.char_list[0])}")
+        print(f"  DEBUG: config.char_list[0] value = {config.char_list[0]}")
+    print(f"  DEBUG: text length = {len(text)} chars")
+    print(f"  DEBUG: text type = {type(text)}")
+
     try:
+        print(f"  Calling prepare_text()...")
         ground_truth_mat, utt_begin_indices = prepare_text(config, text)
+        print(f"  prepare_text() succeeded!")
         print(f"  Ground truth matrix shape: {ground_truth_mat.shape}")
         print(f"  Utterance begin indices: {len(utt_begin_indices)} utterances")
+
+        print(f"  Calling ctc_segmentation()...")
+        print(f"  DEBUG: logits type = {type(logits)}")
+        print(f"  DEBUG: logits shape = {logits.shape}")
+        print(f"  DEBUG: ground_truth_mat type = {type(ground_truth_mat)}")
 
         timings, char_probs, state_list = ctc_segmentation(
             config, logits, ground_truth_mat
         )
-        print(f"  CTC segmentation completed successfully")
+        print(f"  ctc_segmentation() succeeded!")
         print(f"  Generated {len(timings)} timing points")
     except Exception as e:
-        print(f"  CTC segmentation failed: {e}")
-        print(f"  This likely means:")
-        print(f"    1. Transcript is too long for the audio duration")
-        print(f"    2. Audio duration: {audio_duration:.1f}s, Logits duration: {logits_duration:.1f}s")
-        print(f"    3. Transcript has {text_word_count} words (~{text_word_count/150:.1f} min of speech at 150 WPM)")
+        import traceback
+        print(f"  CTC segmentation FAILED!")
+        print(f"  Exception type: {type(e).__name__}")
+        print(f"  Exception message: {str(e)}")
+        print(f"  Full traceback:")
+        traceback.print_exc()
+        print(f"  ")
+        print(f"  Diagnostic info:")
+        print(f"    - Audio duration: {audio_duration:.1f}s")
+        print(f"    - Logits duration: {logits_duration:.1f}s")
+        print(f"    - Transcript words: {text_word_count} (~{text_word_count/150:.1f} min at 150 WPM)")
+        print(f"    - Config char_list final type: {type(config.char_list)}")
         print(f"  Skipping this file...")
         return []
 
