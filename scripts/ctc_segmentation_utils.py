@@ -71,10 +71,13 @@ def segment_audio_with_ctc(
     transcript_sentences: List[str],
     model_name: str = "stt_en_conformer_ctc_large",
     sample_rate: int = 16000,
-    min_confidence: float = -2.0
+    min_confidence: float = -2.0,
+    chunk_duration: float = 120.0  # Process audio in 2-minute chunks
 ) -> List[Dict]:
     """
     Use CTC segmentation to align sentences to audio timestamps.
+
+    Processes long audio files by chunking to avoid GPU OOM errors.
 
     Args:
         audio_path: Path to audio file (local)
@@ -82,6 +85,7 @@ def segment_audio_with_ctc(
         model_name: NeMo ASR model for CTC alignment
         sample_rate: Target sample rate
         min_confidence: Minimum confidence score to accept segment
+        chunk_duration: Duration in seconds for each audio chunk (to avoid OOM)
 
     Returns:
         List of segments with timestamps and text:
@@ -95,22 +99,103 @@ def segment_audio_with_ctc(
             ...
         ]
     """
+    import torch
+    import numpy as np
+
     # Load NeMo ASR model
     print(f"Loading NeMo model: {model_name}...")
     asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name)
     asr_model.eval()
 
-    # Get CTC logits from model using return_hypotheses
-    print("Computing CTC logits...")
-    hypotheses = asr_model.transcribe(
-        audio=[audio_path],
-        batch_size=1,
-        return_hypotheses=True
-    )
+    # Load audio
+    print(f"Loading audio: {audio_path}")
+    audio, sr = librosa.load(audio_path, sr=sample_rate)
+    audio_duration = len(audio) / sample_rate
+    audio_size_mb = audio.nbytes / 1e6
+    print(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} minutes)")
+    print(f"  Audio array size: {audio_size_mb:.1f}MB ({len(audio)} samples)")
 
-    # Extract alignments (log probabilities) from hypothesis
-    logits = hypotheses[0].alignments  # Shape: (time_steps, num_classes)
-    print(f"Logits shape: {logits.shape}")
+    # Adjust chunk duration based on audio length
+    # For very long audio (>30 min), use smaller chunks to be safe
+    if audio_duration > 1800:  # 30 minutes
+        chunk_duration = 60.0  # 1-minute chunks for very long audio
+        print(f"  Very long audio detected - using smaller chunks of {chunk_duration}s")
+
+    # Process audio in chunks to avoid OOM
+    chunk_samples = int(chunk_duration * sample_rate)
+    num_chunks = int(np.ceil(len(audio) / chunk_samples))
+
+    print(f"  Processing in {num_chunks} chunks of {chunk_duration}s each...")
+
+    all_logits = []
+    all_logit_lengths = []
+
+    for i in range(num_chunks):
+        start_idx = i * chunk_samples
+        end_idx = min((i + 1) * chunk_samples, len(audio))
+        audio_chunk = audio[start_idx:end_idx]
+        chunk_duration_actual = len(audio_chunk) / sample_rate
+
+        print(f"    Chunk {i+1}/{num_chunks}: {start_idx/sample_rate:.1f}s - {end_idx/sample_rate:.1f}s (duration: {chunk_duration_actual:.1f}s)")
+
+        # Save chunk to temp file (NeMo requires file path)
+        temp_chunk_path = f"/tmp/audio_chunk_{i}.wav"
+        sf.write(temp_chunk_path, audio_chunk, sample_rate)
+
+        # Log GPU memory before processing
+        if torch.cuda.is_available():
+            mem_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            mem_reserved_gb = torch.cuda.memory_reserved() / 1e9
+            print(f"      GPU memory before transcribe: {mem_allocated_gb:.2f}GB allocated, {mem_reserved_gb:.2f}GB reserved")
+
+        try:
+            # Get CTC logits using forward pass for better memory control
+            print(f"      Starting transcription of chunk {i+1}...")
+            with torch.no_grad():
+                # Use NeMo's transcribe with return_hypotheses
+                hypotheses = asr_model.transcribe(
+                    audio=[temp_chunk_path],
+                    batch_size=1,
+                    return_hypotheses=True
+                )
+
+                # Extract alignments (log probabilities)
+                chunk_logits = hypotheses[0].alignments  # Shape: (time_steps, num_classes)
+                print(f"      Chunk {i+1} logits shape: {chunk_logits.shape}")
+                all_logits.append(chunk_logits)
+                all_logit_lengths.append(chunk_logits.shape[0])
+
+            # Clean up temp file
+            import os
+            os.unlink(temp_chunk_path)
+
+            # Clear CUDA cache after each chunk
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                mem_allocated_gb = torch.cuda.memory_allocated() / 1e9
+                mem_reserved_gb = torch.cuda.memory_reserved() / 1e9
+                print(f"      GPU memory after chunk {i+1}: {mem_allocated_gb:.2f}GB allocated, {mem_reserved_gb:.2f}GB reserved")
+
+        except Exception as e:
+            print(f"      ERROR: Chunk {i+1} failed!")
+            print(f"      Exception type: {type(e).__name__}")
+            print(f"      Exception message: {str(e)[:200]}")
+            import os
+            if os.path.exists(temp_chunk_path):
+                os.unlink(temp_chunk_path)
+            # Clear cache even on failure
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            # Continue with remaining chunks
+            continue
+
+    if not all_logits:
+        print("  No logits generated - all chunks failed")
+        return []
+
+    # Concatenate all chunk logits
+    logits = np.concatenate(all_logits, axis=0)
+    print(f"  Combined logits shape: {logits.shape}")
 
     # Prepare text for alignment (join sentences with space)
     text = " ".join(transcript_sentences)
@@ -121,7 +206,7 @@ def segment_audio_with_ctc(
     config.index_duration = 0.04  # 40ms per frame for Conformer CTC models
 
     # Run CTC segmentation
-    print("Running CTC segmentation...")
+    print("  Running CTC segmentation...")
     ground_truth_mat, utt_begin_indices = prepare_text(config, text)
     timings, char_probs, state_list = ctc_segmentation(
         config, logits, ground_truth_mat
@@ -146,9 +231,9 @@ def segment_audio_with_ctc(
                 "confidence": float(confidence)
             })
         else:
-            print(f"  Skipping low-confidence segment: {confidence:.2f} < {min_confidence}")
+            print(f"    Skipping low-confidence segment: {confidence:.2f} < {min_confidence}")
 
-    print(f"Generated {len(segments)} segments from {len(transcript_sentences)} sentences")
+    print(f"  Generated {len(segments)} segments from {len(transcript_sentences)} sentences")
     return segments
 
 
