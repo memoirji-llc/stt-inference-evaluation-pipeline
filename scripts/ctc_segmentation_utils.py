@@ -37,7 +37,7 @@ import azure_utils
 from evaluate import clean_raw_transcript_str
 
 
-def prepare_text_for_segmentation(text: str) -> List[str]:
+def prepare_text_for_segmentation(text: str, verbose: bool = False) -> List[str]:
     """
     Prepare transcript text for CTC segmentation.
 
@@ -45,12 +45,21 @@ def prepare_text_for_segmentation(text: str) -> List[str]:
 
     Args:
         text: Full transcript text
+        verbose: If True, print detailed logging
 
     Returns:
         List of sentences ready for alignment
     """
+    if verbose:
+        print(f"    Raw transcript length: {len(text)} chars")
+        print(f"    Raw transcript first 300 chars: {text[:300]}")
+
     # Clean the transcript first
     cleaned_text = clean_raw_transcript_str(text)
+
+    if verbose:
+        print(f"    Cleaned transcript length: {len(cleaned_text)} chars")
+        print(f"    Cleaned transcript first 300 chars: {cleaned_text[:300]}")
 
     # Split into sentences at punctuation
     # Simple splitting - can be improved with nltk/spacy if needed
@@ -59,6 +68,11 @@ def prepare_text_for_segmentation(text: str) -> List[str]:
 
     # Filter empty sentences and normalize
     sentences = [s.strip() for s in sentences if s.strip()]
+
+    if verbose:
+        print(f"    After splitting: {len(sentences)} sentences")
+        print(f"    First sentence: {sentences[0] if sentences else 'NONE'}")
+        print(f"    Last sentence: {sentences[-1] if sentences else 'NONE'}")
 
     # Lowercase for CTC (models expect lowercase)
     sentences = [s.lower() for s in sentences]
@@ -107,7 +121,7 @@ def segment_audio_with_ctc(
     asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name)
     asr_model.eval()
 
-    # Load audio
+    # Load audio to check duration
     print(f"Loading audio: {audio_path}")
     audio, sr = librosa.load(audio_path, sr=sample_rate)
     audio_duration = len(audio) / sample_rate
@@ -115,102 +129,100 @@ def segment_audio_with_ctc(
     print(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} minutes)")
     print(f"  Audio array size: {audio_size_mb:.1f}MB ({len(audio)} samples)")
 
-    # Adjust chunk duration based on audio length
-    # For very long audio (>30 min), use smaller chunks to be safe
-    if audio_duration > 1800:  # 30 minutes
-        chunk_duration = 60.0  # 1-minute chunks for very long audio
-        print(f"  Very long audio detected - using smaller chunks of {chunk_duration}s")
+    # Get CTC logits from model (following NeMo's approach)
+    print(f"  Computing CTC logits...")
+    try:
+        with torch.no_grad():
+            hypotheses = asr_model.transcribe(
+                audio=[audio_path],
+                batch_size=1,
+                return_hypotheses=True
+            )
 
-    # Process audio in chunks to avoid OOM
-    chunk_samples = int(chunk_duration * sample_rate)
-    num_chunks = int(np.ceil(len(audio) / chunk_samples))
+            # Extract alignments (log probabilities)
+            log_probs = hypotheses[0].alignments  # Shape: (time_steps, num_classes)
+            print(f"  Logits shape: {log_probs.shape}")
 
-    print(f"  Processing in {num_chunks} chunks of {chunk_duration}s each...")
+            # CRITICAL: Move blank column from last position to first position
+            # NeMo models have blank at last position, but ctc-segmentation expects it at position 0
+            blank_col = log_probs[:, -1].reshape((log_probs.shape[0], 1))
+            log_probs = np.concatenate((blank_col, log_probs[:, :-1]), axis=1)
+            print(f"  Moved blank token to position 0, new shape: {log_probs.shape}")
 
-    all_logits = []
-    all_logit_lengths = []
+            logits = log_probs
 
-    for i in range(num_chunks):
-        start_idx = i * chunk_samples
-        end_idx = min((i + 1) * chunk_samples, len(audio))
-        audio_chunk = audio[start_idx:end_idx]
-        chunk_duration_actual = len(audio_chunk) / sample_rate
-
-        print(f"    Chunk {i+1}/{num_chunks}: {start_idx/sample_rate:.1f}s - {end_idx/sample_rate:.1f}s (duration: {chunk_duration_actual:.1f}s)")
-
-        # Save chunk to temp file (NeMo requires file path)
-        temp_chunk_path = f"/tmp/audio_chunk_{i}.wav"
-        sf.write(temp_chunk_path, audio_chunk, sample_rate)
-
-        # Log GPU memory before processing
-        if torch.cuda.is_available():
-            mem_allocated_gb = torch.cuda.memory_allocated() / 1e9
-            mem_reserved_gb = torch.cuda.memory_reserved() / 1e9
-            print(f"      GPU memory before transcribe: {mem_allocated_gb:.2f}GB allocated, {mem_reserved_gb:.2f}GB reserved")
-
-        try:
-            # Get CTC logits using forward pass for better memory control
-            print(f"      Starting transcription of chunk {i+1}...")
-            with torch.no_grad():
-                # Use NeMo's transcribe with return_hypotheses
-                hypotheses = asr_model.transcribe(
-                    audio=[temp_chunk_path],
-                    batch_size=1,
-                    return_hypotheses=True
-                )
-
-                # Extract alignments (log probabilities)
-                chunk_logits = hypotheses[0].alignments  # Shape: (time_steps, num_classes)
-                print(f"      Chunk {i+1} logits shape: {chunk_logits.shape}")
-                all_logits.append(chunk_logits)
-                all_logit_lengths.append(chunk_logits.shape[0])
-
-            # Clean up temp file
-            import os
-            os.unlink(temp_chunk_path)
-
-            # Clear CUDA cache after each chunk
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print(f"  ERROR: GPU OOM during transcription!")
+            print(f"  Audio duration: {audio_duration:.1f}s is too long for this GPU")
+            print(f"  Suggestion: Use a smaller model or split audio file manually before processing")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                mem_allocated_gb = torch.cuda.memory_allocated() / 1e9
-                mem_reserved_gb = torch.cuda.memory_reserved() / 1e9
-                print(f"      GPU memory after chunk {i+1}: {mem_allocated_gb:.2f}GB allocated, {mem_reserved_gb:.2f}GB reserved")
+            return []
+        else:
+            raise
 
-        except Exception as e:
-            print(f"      ERROR: Chunk {i+1} failed!")
-            print(f"      Exception type: {type(e).__name__}")
-            print(f"      Exception message: {str(e)[:200]}")
-            import os
-            if os.path.exists(temp_chunk_path):
-                os.unlink(temp_chunk_path)
-            # Clear cache even on failure
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            # Continue with remaining chunks
-            continue
+    # Calculate index_duration (time per CTC frame) dynamically
+    # Following NeMo's approach: len(signal) / log_probs.shape[0] / sample_rate
+    index_duration = len(audio) / logits.shape[0] / sample_rate
+    print(f"  Index duration (time per CTC frame): {index_duration:.4f}s")
 
-    if not all_logits:
-        print("  No logits generated - all chunks failed")
-        return []
-
-    # Concatenate all chunk logits
-    logits = np.concatenate(all_logits, axis=0)
-    print(f"  Combined logits shape: {logits.shape}")
+    # Verify logits duration
+    logits_duration = logits.shape[0] * index_duration
+    print(f"  Logits represent {logits_duration:.1f}s of audio (should match {audio_duration:.1f}s)")
 
     # Prepare text for alignment (join sentences with space)
     text = " ".join(transcript_sentences)
+    text_char_count = len(text)
+    text_word_count = len(text.split())
+
+    print(f"  Transcript stats:")
+    print(f"    - Sentences: {len(transcript_sentences)}")
+    print(f"    - Total characters: {text_char_count}")
+    print(f"    - Total words: {text_word_count}")
+    print(f"    - First 200 chars: {text[:200]}")
+    print(f"    - Last 200 chars: ...{text[-200:]}")
 
     # CTC segmentation configuration
     config = CtcSegmentationParameters()
-    config.char_list = asr_model.decoder.vocabulary  # Model's character set
-    config.index_duration = 0.04  # 40ms per frame for Conformer CTC models
+
+    # Convert vocabulary to regular Python list and add blank symbol at position 0
+    # Following NeMo's approach
+    vocabulary = asr_model.decoder.vocabulary
+    if hasattr(vocabulary, '__iter__') and not isinstance(vocabulary, list):
+        vocabulary = list(vocabulary)
+
+    # Add blank symbol "ε" at the beginning (position 0)
+    vocabulary = ["ε"] + vocabulary
+
+    config.char_list = vocabulary
+    config.index_duration = index_duration  # Use calculated value, not hardcoded
+    config.blank = 0  # Blank is at position 0 after moving the column
+
+    print(f"  Vocabulary size (with blank): {len(config.char_list)} tokens")
+    print(f"  Vocabulary type: {type(config.char_list)}")
+    print(f"  Blank token at position: {config.blank}")
 
     # Run CTC segmentation
     print("  Running CTC segmentation...")
-    ground_truth_mat, utt_begin_indices = prepare_text(config, text)
-    timings, char_probs, state_list = ctc_segmentation(
-        config, logits, ground_truth_mat
-    )
+    try:
+        ground_truth_mat, utt_begin_indices = prepare_text(config, text)
+        print(f"  Ground truth matrix shape: {ground_truth_mat.shape}")
+        print(f"  Utterance begin indices: {len(utt_begin_indices)} utterances")
+
+        timings, char_probs, state_list = ctc_segmentation(
+            config, logits, ground_truth_mat
+        )
+        print(f"  CTC segmentation completed successfully")
+        print(f"  Generated {len(timings)} timing points")
+    except Exception as e:
+        print(f"  CTC segmentation failed: {e}")
+        print(f"  This likely means:")
+        print(f"    1. Transcript is too long for the audio duration")
+        print(f"    2. Audio duration: {audio_duration:.1f}s, Logits duration: {logits_duration:.1f}s")
+        print(f"    3. Transcript has {text_word_count} words (~{text_word_count/150:.1f} min of speech at 150 WPM)")
+        print(f"  Skipping this file...")
+        return []
 
     # Extract segments with timestamps
     segments = []
@@ -406,8 +418,16 @@ def process_single_vhp_row(
         print("  No transcript found, skipping")
         return []
 
-    sentences = prepare_text_for_segmentation(full_transcript)
+    print(f"  Raw transcript type: {type(full_transcript)}")
+    print(f"  Raw transcript length: {len(full_transcript)} chars")
+
+    sentences = prepare_text_for_segmentation(full_transcript, verbose=True)
     print(f"  Split into {len(sentences)} sentences")
+
+    # Calculate expected speech duration
+    total_words = sum(len(s.split()) for s in sentences)
+    expected_duration_min = total_words / 150  # 150 words per minute
+    print(f"  Transcript has {total_words} words, expecting ~{expected_duration_min:.1f} min of speech")
 
     # 3. CTC segmentation
     print("  Running CTC segmentation...")
