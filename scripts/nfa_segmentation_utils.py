@@ -674,19 +674,20 @@ def process_parquet_batch(
     # Process each row
     all_output_rows = []
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        for idx, row in df.iterrows():
-            output_rows = process_single_vhp_row(
-                row,
-                idx,
-                blob_prefix=blob_prefix,
-                model_name=model_name,
-                max_duration=max_duration,
-                temp_dir=temp_dir,
-                transcript_field=transcript_field,
-                max_audio_duration=max_audio_duration
-            )
-            all_output_rows.extend(output_rows)
+    # DON'T pass temp_dir - let each file create and clean up its own temp directory
+    # This prevents disk space issues when processing thousands of files
+    for idx, row in df.iterrows():
+        output_rows = process_single_vhp_row(
+            row,
+            idx,
+            blob_prefix=blob_prefix,
+            model_name=model_name,
+            max_duration=max_duration,
+            temp_dir=None,  # Let each file handle its own temp directory
+            transcript_field=transcript_field,
+            max_audio_duration=max_audio_duration
+        )
+        all_output_rows.extend(output_rows)
 
     # Create output DataFrame
     df_output = pd.DataFrame(all_output_rows)
