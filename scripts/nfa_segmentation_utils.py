@@ -158,9 +158,21 @@ def run_nfa_alignment(
         }
 
     except subprocess.CalledProcessError as e:
-        print(f"  NFA failed with error:")
-        print(f"  STDOUT: {e.stdout}")
-        print(f"  STDERR: {e.stderr}")
+        print(f"\n{'='*80}")
+        print(f"ERROR: NFA subprocess failed during alignment")
+        print(f"{'='*80}")
+        print(f"Exit code: {e.returncode}")
+        print(f"Command: {' '.join(cmd)}")
+        print(f"\nThis means NFA could not align the transcript to audio.")
+        print(f"Common causes:")
+        print(f"  - Transcript contains unsupported characters")
+        print(f"  - Audio quality too poor for alignment")
+        print(f"  - Model tokenization error")
+        print(f"\nNFA STDOUT:")
+        print(e.stdout if e.stdout else "(empty)")
+        print(f"\nNFA STDERR:")
+        print(e.stderr if e.stderr else "(empty)")
+        print(f"{'='*80}\n")
         raise
 
 
@@ -178,6 +190,9 @@ def parse_ctm_file(ctm_path: str) -> List[Dict]:
     """
     segments = []
 
+    # NFA's special tokens to filter out (non-lexical markers)
+    SPECIAL_TOKENS = {'NA', 'lex', '<unk>', '[UNK]', '<eps>', 'ε'}
+
     with open(ctm_path, 'r') as f:
         for line in f:
             line = line.strip()
@@ -189,6 +204,11 @@ def parse_ctm_file(ctm_path: str) -> List[Dict]:
                 continue
 
             utt_id, channel, start_time, duration, text = parts
+
+            # Filter out special tokens
+            if text in SPECIAL_TOKENS:
+                continue
+
             start_time = float(start_time)
             duration = float(duration)
             end_time = start_time + duration
@@ -209,7 +229,7 @@ def segment_audio_with_nfa(
     transcript_text: str,
     model_name: str = "stt_en_conformer_ctc_large",
     max_duration: float = 30.0,
-    use_words: bool = True
+    use_words: bool = False
 ) -> List[Dict]:
     """
     Segment audio using NeMo Forced Aligner.
@@ -219,7 +239,9 @@ def segment_audio_with_nfa(
         transcript_text: Plain text transcript
         model_name: NeMo model for alignment
         max_duration: Maximum segment duration (seconds)
-        use_words: If True, use word-level CTM; if False, use segment-level CTM
+        use_words: If True, use word-level CTM; if False, use segment-level CTM (recommended)
+            - segment-level: Uses natural sentence boundaries (., ?, !, ...)
+            - word-level: Individual words, requires manual grouping
 
     Returns:
         List of segment dicts with start, end, duration, text
@@ -238,7 +260,8 @@ def segment_audio_with_nfa(
         print(f"  Parsing {Path(ctm_file).name}...")
 
         all_segments = parse_ctm_file(ctm_file)
-        print(f"  Found {len(all_segments)} word/segment alignments")
+        segment_type = "sentence-level segments" if not use_words else "word-level tokens"
+        print(f"  Found {len(all_segments)} {segment_type}")
 
         # Group segments to fit within max_duration
         grouped_segments = []
@@ -454,7 +477,10 @@ def process_single_vhp_row(
         else:
             transcript_text = full_transcript
 
-        print(f"  Transcript: {len(transcript_text)} chars")
+        # Debug: Show what text we're passing to NFA
+        print(f"  Transcript field used: '{transcript_field}'")
+        print(f"  Transcript length: {len(transcript_text)} chars, {len(transcript_text.split())} words")
+        print(f"  First 150 chars: {transcript_text[:150]}...")
 
         # 3. Run NFA segmentation
         print("  Running NFA segmentation...")
@@ -463,7 +489,7 @@ def process_single_vhp_row(
             transcript_text,
             model_name=model_name,
             max_duration=max_duration,
-            use_words=True  # Use word-level alignment
+            use_words=False  # Use segment-level (sentence boundaries) instead of word-level
         )
 
         if not segments:
@@ -522,9 +548,20 @@ def process_single_vhp_row(
         return output_rows
 
     except Exception as e:
-        print(f"  ERROR processing row {row_idx}: {e}")
+        print(f"\n{'='*80}")
+        print(f"ERROR: Failed to process ENTIRE FILE for row {row_idx}")
+        print(f"{'='*80}")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print(f"\nThis means the full interview audio could not be segmented.")
+        print(f"Possible causes:")
+        print(f"  - Audio download failed")
+        print(f"  - NFA alignment failed (check transcript quality)")
+        print(f"  - Audio/transcript mismatch (different durations)")
+        print(f"\nFull traceback:")
         import traceback
         traceback.print_exc()
+        print(f"{'='*80}\n")
         return []
 
     finally:
