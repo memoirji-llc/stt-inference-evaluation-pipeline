@@ -44,7 +44,7 @@ def setup_logging():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"nfa_segmentation_{timestamp}.log"
 
-    # Configure logging
+    # Configure root logger to capture all logs
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -53,6 +53,10 @@ def setup_logging():
             logging.StreamHandler(sys.stdout)
         ]
     )
+
+    # Suppress Azure SDK HTTP logs (too verbose)
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
 
     logger = logging.getLogger(__name__)
     logger.info(f"Log file: {log_file}")
@@ -114,7 +118,7 @@ def main():
                 parquet_path=str(TRAIN_INPUT),
                 output_parquet_path=str(TRAIN_OUTPUT),
                 model_name=NEMO_MODEL,
-                sample_size=None,  # Process ALL files
+                sample_size=100,  # Process ALL files
                 max_duration=MAX_DURATION,
                 blob_prefix=BLOB_PREFIX,
                 transcript_field=TRANSCRIPT_FIELD,
@@ -157,7 +161,7 @@ def main():
                 parquet_path=str(VAL_INPUT),
                 output_parquet_path=str(VAL_OUTPUT),
                 model_name=NEMO_MODEL,
-                sample_size=None,  # Process ALL files
+                sample_size=100,  # Process ALL files
                 max_duration=MAX_DURATION,
                 blob_prefix=BLOB_PREFIX,
                 transcript_field=TRANSCRIPT_FIELD,
