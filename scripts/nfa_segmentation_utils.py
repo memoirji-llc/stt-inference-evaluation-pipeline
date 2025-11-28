@@ -20,6 +20,28 @@ import azure_utils
 from evaluate import clean_raw_transcript_str
 
 
+def get_audio_duration(audio_path: str) -> float:
+    """
+    Get duration of audio file in seconds.
+
+    Args:
+        audio_path: Path to audio file
+
+    Returns:
+        Duration in seconds
+    """
+    try:
+        info = sf.info(audio_path)
+        return info.duration
+    except Exception as e:
+        # Fallback to pydub if soundfile fails
+        try:
+            audio = AudioSegment.from_file(audio_path)
+            return len(audio) / 1000.0  # Convert ms to seconds
+        except Exception as e2:
+            raise RuntimeError(f"Could not get audio duration: {e}, {e2}")
+
+
 def prepare_text_for_nfa(fulltext_file_str: str) -> str:
     """
     Prepare transcript text for NFA alignment.
@@ -43,7 +65,7 @@ def run_nfa_alignment(
     audio_path: str,
     transcript_text: str,
     output_dir: str,
-    model_name: str = "stt_en_conformer_ctc_large",
+    model_name: str = "stt_en_conformer_ctc_medium",  # Changed from "large" to reduce GPU memory
     nfa_script_path: Optional[str] = None
 ) -> Dict[str, str]:
     """
@@ -227,7 +249,7 @@ def parse_ctm_file(ctm_path: str) -> List[Dict]:
 def segment_audio_with_nfa(
     audio_path: str,
     transcript_text: str,
-    model_name: str = "stt_en_conformer_ctc_large",
+    model_name: str = "stt_en_conformer_ctc_medium",  # Changed from "large" to reduce GPU memory
     max_duration: float = 30.0,
     use_words: bool = False
 ) -> List[Dict]:
@@ -398,10 +420,11 @@ def process_single_vhp_row(
     row,
     row_idx: int,
     blob_prefix: str = "loc_vhp",
-    model_name: str = "stt_en_conformer_ctc_large",
+    model_name: str = "stt_en_conformer_ctc_medium",  # Changed from "large" to reduce GPU memory
     max_duration: float = 30.0,
     temp_dir: Optional[str] = None,
-    transcript_field: str = "fulltext_file_str"
+    transcript_field: str = "fulltext_file_str",
+    max_audio_duration: float = 1800.0  # Skip files longer than 30 minutes (default)
 ) -> List[Dict]:
     """
     Process a single VHP parquet row with NFA segmentation.
@@ -410,12 +433,15 @@ def process_single_vhp_row(
         row: Pandas DataFrame row
         row_idx: Row index in original parquet
         blob_prefix: Azure blob prefix
-        model_name: NeMo model for alignment
-        max_duration: Max segment duration
+        model_name: NeMo model for alignment (default: medium for lower GPU memory)
+        max_duration: Max segment duration (seconds)
         temp_dir: Temporary directory (created if None)
         transcript_field: Column name to use for transcript text
             - "fulltext_file_str": Raw XML transcript (may have encoding issues)
             - "transcript_raw_text_only": Pre-cleaned plain text (recommended)
+        max_audio_duration: Skip files longer than this (seconds, default 1800 = 30 min)
+            - Prevents CUDA OOM errors on very long files
+            - Set to None to disable duration filtering
 
     Returns:
         List of output row dicts for segmented parquet
@@ -463,6 +489,17 @@ def process_single_vhp_row(
         audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
         wav_path = os.path.join(temp_dir, f"original_{blob_index}.wav")
         audio_seg.export(wav_path, format="wav")
+
+        # Check audio duration to avoid CUDA OOM on very long files
+        if max_audio_duration is not None:
+            audio_duration = get_audio_duration(wav_path)
+            print(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} min)")
+
+            if audio_duration > max_audio_duration:
+                print(f"  ⚠️  SKIPPING: Audio too long ({audio_duration/60:.1f} min > {max_audio_duration/60:.1f} min limit)")
+                print(f"      Reason: Prevents CUDA OOM errors on T4 GPU")
+                print(f"      To process this file: increase max_audio_duration or use smaller model")
+                return []
 
         # 2. Prepare transcript
         print("  Preparing transcript...")
@@ -573,11 +610,12 @@ def process_single_vhp_row(
 def process_parquet_batch(
     parquet_path: str,
     output_parquet_path: str,
-    model_name: str = "stt_en_conformer_ctc_large",
+    model_name: str = "stt_en_conformer_ctc_medium",  # Changed from "large" to reduce GPU memory
     sample_size: Optional[int] = None,
     max_duration: float = 30.0,
     blob_prefix: str = "loc_vhp",
-    transcript_field: str = "fulltext_file_str"
+    transcript_field: str = "fulltext_file_str",
+    max_audio_duration: float = 1800.0  # Skip files longer than 30 minutes
 ) -> pd.DataFrame:
     """
     Process multiple rows from parquet with NFA segmentation.
@@ -585,13 +623,16 @@ def process_parquet_batch(
     Args:
         parquet_path: Input parquet file path
         output_parquet_path: Output parquet file path
-        model_name: NeMo model for alignment
+        model_name: NeMo model for alignment (default: medium for lower GPU memory)
         sample_size: Number of rows to process (None for all)
-        max_duration: Max segment duration
+        max_duration: Max segment duration (seconds)
         blob_prefix: Azure blob prefix
         transcript_field: Column name for transcript
             - "fulltext_file_str": Raw XML (default, may have bugs)
             - "transcript_raw_text_only": Pre-cleaned (recommended)
+        max_audio_duration: Skip files longer than this (seconds, default 1800 = 30 min)
+            - Prevents CUDA OOM errors on very long files
+            - Set to None to disable duration filtering
 
     Returns:
         DataFrame with segmented data
@@ -617,7 +658,8 @@ def process_parquet_batch(
                 model_name=model_name,
                 max_duration=max_duration,
                 temp_dir=temp_dir,
-                transcript_field=transcript_field
+                transcript_field=transcript_field,
+                max_audio_duration=max_audio_duration
             )
             all_output_rows.extend(output_rows)
 
