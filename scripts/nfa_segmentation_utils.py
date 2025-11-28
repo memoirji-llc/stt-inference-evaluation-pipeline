@@ -6,6 +6,7 @@ audio interviews into training-ready chunks with precise word-level timestamps.
 """
 
 import os
+import sys
 import json
 import tempfile
 import subprocess
@@ -156,9 +157,10 @@ def run_nfa_alignment(
     logger.debug(f"    Text: {len(transcript_text)} chars")
     logger.debug(f"    Model: {model_name}")
 
-    # Run NFA
+    # Run NFA using the same Python interpreter as the current process
+    # This ensures we use the venv's Python with all dependencies installed
     cmd = [
-        "python", str(nfa_script_path),
+        sys.executable, str(nfa_script_path),
         f"pretrained_name={model_name}",
         f"manifest_filepath={manifest_path}",
         f"output_dir={output_dir}",
