@@ -311,9 +311,38 @@ def segment_audio_with_ctc(
     print(f"  DEBUG: text_list type = {type(text_list)}")
 
     try:
-        print(f"  Calling prepare_text() with list of {len(text_list)} sentences...")
-        ground_truth_mat, utt_begin_indices = prepare_text(config, text_list)
-        print(f"  prepare_text() succeeded!")
+        print(f"  Preparing ground truth matrix for {len(text_list)} sentences...")
+
+        # Check if BPE model or character-based model
+        is_bpe_model = hasattr(asr_model, 'tokenizer')
+
+        if is_bpe_model:
+            # For BPE models, use custom preparation (following NeMo's approach)
+            print(f"  Using BPE tokenization...")
+            space_idx = vocabulary.index("▁")
+            ground_truth_mat = [[-1, -1]]
+            utt_begin_indices = []
+
+            for uttr in text_list:
+                ground_truth_mat += [[0, space_idx]]  # blank_idx=0, space
+                utt_begin_indices.append(len(ground_truth_mat))
+                token_ids = asr_model.tokenizer.text_to_ids(uttr)
+                # blank token is moved from the last to the first (0) position
+                token_ids = [idx + 1 for idx in token_ids]
+                ground_truth_mat += [[t, -1] for t in token_ids]
+
+            utt_begin_indices.append(len(ground_truth_mat))
+            ground_truth_mat += [[0, space_idx]]
+            ground_truth_mat = np.array(ground_truth_mat, np.int64)
+        else:
+            # For character-based models, use standard prepare_text
+            print(f"  Using character-based segmentation...")
+            config.excluded_characters = ".,-?!:»«;'›‹()"
+            config.blank = vocabulary.index(" ")
+            ground_truth_mat, utt_begin_indices = prepare_text(config, text_list)
+            # Reset blank to 0 after prepare_text
+            config.blank = 0
+
         print(f"  Ground truth matrix shape: {ground_truth_mat.shape}")
         print(f"  Utterance begin indices: {len(utt_begin_indices)} utterances")
 
