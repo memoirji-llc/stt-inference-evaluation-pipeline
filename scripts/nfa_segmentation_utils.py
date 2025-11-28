@@ -66,24 +66,51 @@ def run_nfa_alignment(
     """
     # Find NFA script if not provided
     if nfa_script_path is None:
-        import nemo
-        nemo_path = Path(nemo.__file__).parent.parent.parent.parent
-        nfa_script_path = nemo_path / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py"
+        possible_paths = []
 
-        # If not found in expected location, try common locations
-        if not nfa_script_path.exists():
-            possible_paths = [
-                Path.home() / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py",
-                Path("/workspace/NeMo/tools/nemo_forced_aligner/align.py"),
-            ]
-            for p in possible_paths:
-                if p.exists():
-                    nfa_script_path = p
-                    break
+        # Check environment variable first
+        if 'NEMO_REPO_PATH' in os.environ:
+            nemo_repo = Path(os.environ['NEMO_REPO_PATH'])
+            possible_paths.append(nemo_repo / "tools" / "nemo_forced_aligner" / "align.py")
 
-        if not nfa_script_path.exists():
+        # Try to find from nemo package installation
+        try:
+            import nemo
+            # NeMo installed as package - look in site-packages or nearby
+            nemo_pkg_path = Path(nemo.__file__).parent
+
+            # Check if NeMo repo is cloned adjacent to site-packages
+            possible_paths.extend([
+                nemo_pkg_path.parent.parent.parent / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py",
+                nemo_pkg_path.parent / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py",
+            ])
+        except ImportError:
+            pass
+
+        # Add common clone locations
+        possible_paths.extend([
+            Path.home() / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py",
+            Path("/workspace/NeMo/tools/nemo_forced_aligner/align.py"),
+            Path.cwd() / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py",
+            Path.cwd().parent / "NeMo" / "tools" / "nemo_forced_aligner" / "align.py",
+        ])
+
+        # Try each path
+        nfa_script_path = None
+        for p in possible_paths:
+            if p.exists():
+                nfa_script_path = p
+                print(f"  Found NFA script: {nfa_script_path}")
+                break
+
+        if nfa_script_path is None or not nfa_script_path.exists():
             raise FileNotFoundError(
-                "Could not find NFA align.py script. Please specify nfa_script_path parameter."
+                f"Could not find NFA align.py script. Tried paths:\n" +
+                "\n".join(f"  - {p}" for p in possible_paths) +
+                "\n\nPlease either:\n" +
+                "  1. Clone NeMo repo: git clone https://github.com/NVIDIA/NeMo\n" +
+                "  2. Set NEMO_REPO_PATH environment variable to the NeMo repo directory\n" +
+                "  3. Specify nfa_script_path parameter explicitly in the function call"
             )
 
     # Create manifest file
