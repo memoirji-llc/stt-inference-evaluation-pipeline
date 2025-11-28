@@ -246,17 +246,19 @@ def segment_audio_with_ctc(
     logits_duration = logits.shape[0] * index_duration
     print(f"  Logits represent {logits_duration:.1f}s of audio (should match {audio_duration:.1f}s)")
 
-    # Prepare text for alignment (join sentences with space)
-    text = " ".join(transcript_sentences)
-    text_char_count = len(text)
-    text_word_count = len(text.split())
+    # Prepare text for alignment
+    # CRITICAL: Pass list of sentences, NOT joined string!
+    # The ctc-segmentation library needs sentences as separate list items
+    text_list = transcript_sentences  # Keep as list
+    text_char_count = sum(len(s) for s in text_list)
+    text_word_count = sum(len(s.split()) for s in text_list)
 
     print(f"  Transcript stats:")
-    print(f"    - Sentences: {len(transcript_sentences)}")
+    print(f"    - Sentences: {len(text_list)}")
     print(f"    - Total characters: {text_char_count}")
     print(f"    - Total words: {text_word_count}")
-    print(f"    - First 200 chars: {text[:200]}")
-    print(f"    - Last 200 chars: ...{text[-200:]}")
+    print(f"    - First sentence: {text_list[0][:100] if text_list else 'NONE'}")
+    print(f"    - Last sentence: {text_list[-1][:100] if text_list else 'NONE'}")
 
     # CTC segmentation configuration
     config = CtcSegmentationParameters()
@@ -305,12 +307,12 @@ def segment_audio_with_ctc(
     if len(config.char_list) > 0:
         print(f"  DEBUG: config.char_list[0] type = {type(config.char_list[0])}")
         print(f"  DEBUG: config.char_list[0] value = {config.char_list[0]}")
-    print(f"  DEBUG: text length = {len(text)} chars")
-    print(f"  DEBUG: text type = {type(text)}")
+    print(f"  DEBUG: text_list length = {len(text_list)} sentences")
+    print(f"  DEBUG: text_list type = {type(text_list)}")
 
     try:
-        print(f"  Calling prepare_text()...")
-        ground_truth_mat, utt_begin_indices = prepare_text(config, text)
+        print(f"  Calling prepare_text() with list of {len(text_list)} sentences...")
+        ground_truth_mat, utt_begin_indices = prepare_text(config, text_list)
         print(f"  prepare_text() succeeded!")
         print(f"  Ground truth matrix shape: {ground_truth_mat.shape}")
         print(f"  Utterance begin indices: {len(utt_begin_indices)} utterances")
