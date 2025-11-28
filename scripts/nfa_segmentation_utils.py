@@ -555,13 +555,38 @@ def process_single_vhp_row(
         # 6. Create output records
         output_rows = []
         for i, (seg, blob_path) in enumerate(zip(segments, blob_paths)):
+            # Clean the segment text:
+            # 1. Replace <space> with actual spaces
+            cleaned_text = seg["text"].replace("<space>", " ")
+
+            # 2. Remove NFA special token PATTERNS only
+            # The marker pattern "NA lex NA" appears when NFA detects non-speech sounds.
+            # We remove the pattern itself, but preserve standalone "NA" or "lex" as real words
+            # (e.g., "My friend Lex" or "NA forces" should be kept).
+            import re
+
+            # Remove the specific "NA lex NA" marker patterns
+            cleaned_text = re.sub(r'\b(NA\s+lex|lex\s+NA)(\s+NA)*\b', ' ', cleaned_text)
+            cleaned_text = re.sub(r'\b(NA\s+){2,}', ' ', cleaned_text)  # Multiple consecutive NAs
+
+            # Remove technical markers that are never real speech
+            technical_tokens = ['<unk>', '[UNK]', '<eps>', 'ε']
+            for token in technical_tokens:
+                cleaned_text = cleaned_text.replace(token, ' ')
+
+            # 3. Clean up multiple spaces and trim
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+
             new_row = row.to_dict()
             new_row.update({
                 "source_row_idx": row_idx,
                 "segment_idx": i,
-                "audio_url": blob_path,
+                # NEW columns for segmented data (don't overwrite originals)
+                "segmented_audio_url": blob_path,
+                "segmented_audio_transcript": cleaned_text,
+                # Keep video_url as None for segments (they're audio-only WAV files)
                 "video_url": None,
-                "fulltext_file_str": seg["text"],
+                # Segment metadata
                 "start_time": seg["start"],
                 "end_time": seg["end"],
                 "confidence": seg["confidence"],
