@@ -377,7 +377,8 @@ def process_single_vhp_row(
     blob_prefix: str = "loc_vhp",
     model_name: str = "stt_en_conformer_ctc_large",
     max_duration: float = 30.0,
-    temp_dir: Optional[str] = None
+    temp_dir: Optional[str] = None,
+    transcript_field: str = "fulltext_file_str"
 ) -> List[Dict]:
     """
     Process a single VHP parquet row with NFA segmentation.
@@ -389,6 +390,9 @@ def process_single_vhp_row(
         model_name: NeMo model for alignment
         max_duration: Max segment duration
         temp_dir: Temporary directory (created if None)
+        transcript_field: Column name to use for transcript text
+            - "fulltext_file_str": Raw XML transcript (may have encoding issues)
+            - "transcript_raw_text_only": Pre-cleaned plain text (recommended)
 
     Returns:
         List of output row dicts for segmented parquet
@@ -439,12 +443,17 @@ def process_single_vhp_row(
 
         # 2. Prepare transcript
         print("  Preparing transcript...")
-        full_transcript = row.get('fulltext_file_str', '')
+        full_transcript = row.get(transcript_field, '')
         if not full_transcript:
-            print("  No transcript found, skipping")
+            print(f"  No transcript found in '{transcript_field}', skipping")
             return []
 
-        transcript_text = prepare_text_for_nfa(full_transcript)
+        # If using fulltext_file_str, clean it; otherwise use as-is
+        if transcript_field == 'fulltext_file_str':
+            transcript_text = prepare_text_for_nfa(full_transcript)
+        else:
+            transcript_text = full_transcript
+
         print(f"  Transcript: {len(transcript_text)} chars")
 
         # 3. Run NFA segmentation
@@ -530,7 +539,8 @@ def process_parquet_batch(
     model_name: str = "stt_en_conformer_ctc_large",
     sample_size: Optional[int] = None,
     max_duration: float = 30.0,
-    blob_prefix: str = "loc_vhp"
+    blob_prefix: str = "loc_vhp",
+    transcript_field: str = "fulltext_file_str"
 ) -> pd.DataFrame:
     """
     Process multiple rows from parquet with NFA segmentation.
@@ -542,6 +552,9 @@ def process_parquet_batch(
         sample_size: Number of rows to process (None for all)
         max_duration: Max segment duration
         blob_prefix: Azure blob prefix
+        transcript_field: Column name for transcript
+            - "fulltext_file_str": Raw XML (default, may have bugs)
+            - "transcript_raw_text_only": Pre-cleaned (recommended)
 
     Returns:
         DataFrame with segmented data
@@ -566,7 +579,8 @@ def process_parquet_batch(
                 blob_prefix=blob_prefix,
                 model_name=model_name,
                 max_duration=max_duration,
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
+                transcript_field=transcript_field
             )
             all_output_rows.extend(output_rows)
 
