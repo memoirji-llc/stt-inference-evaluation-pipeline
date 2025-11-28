@@ -131,6 +131,15 @@ To activate virtual environment in terminal:
 Make sure notebook can be run:
 `uv add --dev ipykernel`
 
+**Important: NeMo Forced Aligner requires additional setup**
+For audio segmentation (creating training data from long-form interviews), you need both:
+1. NeMo package (installed via `uv sync`)
+2. NeMo repository clone (for the forced aligner CLI tool):
+```bash
+git clone https://github.com/NVIDIA/NeMo
+```
+The path will be auto-detected if cloned to project root, home directory, or `/workspace/NeMo`. Otherwise set `NEMO_REPO_PATH` environment variable.
+
 Testing PyTorch + MPS + torchaudio:
 1.
 ```
