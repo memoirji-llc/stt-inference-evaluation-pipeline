@@ -10,6 +10,7 @@ import json
 import tempfile
 import subprocess
 import pandas as pd
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional
 from pydub import AudioSegment
@@ -18,6 +19,9 @@ import soundfile as sf
 # Import existing utilities
 import azure_utils
 from evaluate import clean_raw_transcript_str
+
+# Setup logger for this module
+logger = logging.getLogger(__name__)
 
 
 def get_audio_duration(audio_path: str) -> float:
@@ -122,7 +126,7 @@ def run_nfa_alignment(
         for p in possible_paths:
             if p.exists():
                 nfa_script_path = p
-                print(f"  Found NFA script: {nfa_script_path}")
+                logger.debug(f"  Found NFA script: {nfa_script_path}")
                 break
 
         if nfa_script_path is None or not nfa_script_path.exists():
@@ -147,10 +151,10 @@ def run_nfa_alignment(
     with open(manifest_path, 'w') as f:
         f.write(json.dumps(manifest_data) + "\n")
 
-    print(f"  Running NFA alignment...")
-    print(f"    Audio: {audio_path}")
-    print(f"    Text: {len(transcript_text)} chars")
-    print(f"    Model: {model_name}")
+    logger.info(f"  Running NFA alignment...")
+    logger.debug(f"    Audio: {audio_path}")
+    logger.debug(f"    Text: {len(transcript_text)} chars")
+    logger.debug(f"    Model: {model_name}")
 
     # Run NFA
     cmd = [
@@ -169,7 +173,7 @@ def run_nfa_alignment(
             text=True,
             check=True
         )
-        print(f"  NFA completed successfully")
+        logger.info(f"  NFA completed successfully")
 
         # Return paths to CTM files
         audio_basename = Path(audio_path).stem
@@ -180,21 +184,19 @@ def run_nfa_alignment(
         }
 
     except subprocess.CalledProcessError as e:
-        print(f"\n{'='*80}")
-        print(f"ERROR: NFA subprocess failed during alignment")
-        print(f"{'='*80}")
-        print(f"Exit code: {e.returncode}")
-        print(f"Command: {' '.join(cmd)}")
-        print(f"\nThis means NFA could not align the transcript to audio.")
-        print(f"Common causes:")
-        print(f"  - Transcript contains unsupported characters")
-        print(f"  - Audio quality too poor for alignment")
-        print(f"  - Model tokenization error")
-        print(f"\nNFA STDOUT:")
-        print(e.stdout if e.stdout else "(empty)")
-        print(f"\nNFA STDERR:")
-        print(e.stderr if e.stderr else "(empty)")
-        print(f"{'='*80}\n")
+        logger.error(f"")
+        logger.error(f"{'='*80}")
+        logger.error(f"NFA subprocess failed during alignment")
+        logger.error(f"{'='*80}")
+        logger.error(f"Exit code: {e.returncode}")
+        logger.error(f"Command: {' '.join(cmd)}")
+        logger.error(f"Common causes:")
+        logger.error(f"  - Transcript contains unsupported characters")
+        logger.error(f"  - Audio quality too poor for alignment")
+        logger.error(f"  - Model tokenization error")
+        logger.error(f"NFA STDOUT: {e.stdout if e.stdout else '(empty)'}")
+        logger.error(f"NFA STDERR: {e.stderr if e.stderr else '(empty)'}")
+        logger.error(f"{'='*80}")
         raise
 
 
@@ -279,11 +281,11 @@ def segment_audio_with_nfa(
 
         # Parse appropriate CTM file
         ctm_file = ctm_paths["words"] if use_words else ctm_paths["segments"]
-        print(f"  Parsing {Path(ctm_file).name}...")
+        logger.debug(f"  Parsing {Path(ctm_file).name}...")
 
         all_segments = parse_ctm_file(ctm_file)
         segment_type = "sentence-level segments" if not use_words else "word-level tokens"
-        print(f"  Found {len(all_segments)} {segment_type}")
+        logger.info(f"  Found {len(all_segments)} {segment_type}")
 
         # Group segments to fit within max_duration
         grouped_segments = []
@@ -328,7 +330,7 @@ def segment_audio_with_nfa(
                 "confidence": 1.0
             })
 
-        print(f"  Grouped into {len(grouped_segments)} segments (max {max_duration}s each)")
+        logger.info(f"  Grouped into {len(grouped_segments)} segments (max {max_duration}s each)")
 
         return grouped_segments
 
@@ -366,7 +368,7 @@ def cut_audio_segments(
 
         # Skip if segment too long
         if duration_sec > max_duration:
-            print(f"  Warning: Segment {i} too long ({duration_sec:.1f}s), skipping")
+            logger.warning(f"  Segment {i} too long ({duration_sec:.1f}s), skipping")
             continue
 
         # Extract segment
@@ -408,7 +410,7 @@ def upload_segments_to_blob(
         with open(seg_path, 'rb') as f:
             audio_bytes = f.read()
 
-        print(f"  Uploading: {blob_path}")
+        logger.debug(f"  Uploading: {blob_path}")
         azure_utils.upload_blob(blob_path, audio_bytes)
 
         blob_paths.append(blob_path)
@@ -457,15 +459,15 @@ def process_single_vhp_row(
     else:
         cleanup_temp = False
 
-    print(f"\n[Row {row_idx}] Processing blob_index={blob_index}")
+    logger.info(f"[Row {row_idx}] Processing blob_index={blob_index}")
 
     try:
         # 1. Download audio
-        print("  Downloading audio from Azure...")
+        logger.info(f"  Downloading audio from Azure...")
         blob_paths = data_loader.get_blob_path_for_row(row, row_idx, blob_prefix)
 
         if not blob_paths:
-            print("  No blob path found, skipping")
+            logger.warning(f"  No blob path found, skipping")
             return []
 
         audio_bytes = None
@@ -475,7 +477,7 @@ def process_single_vhp_row(
                 break
 
         if audio_bytes is None:
-            print("  Could not download audio, skipping")
+            logger.warning(f"  Could not download audio, skipping")
             return []
 
         # Save to temp file
@@ -484,7 +486,7 @@ def process_single_vhp_row(
             f.write(audio_bytes)
 
         # Convert to WAV 16kHz
-        print("  Converting to WAV...")
+        logger.info(f"  Converting to WAV...")
         audio_seg = AudioSegment.from_file(temp_audio_path)
         audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
         wav_path = os.path.join(temp_dir, f"original_{blob_index}.wav")
@@ -493,19 +495,18 @@ def process_single_vhp_row(
         # Check audio duration to avoid CUDA OOM on very long files
         if max_audio_duration is not None:
             audio_duration = get_audio_duration(wav_path)
-            print(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} min)")
+            logger.info(f"  Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f} min)")
 
             if audio_duration > max_audio_duration:
-                print(f"  ⚠️  SKIPPING: Audio too long ({audio_duration/60:.1f} min > {max_audio_duration/60:.1f} min limit)")
-                print(f"      Reason: Prevents CUDA OOM errors on T4 GPU")
-                print(f"      To process this file: increase max_audio_duration or use smaller model")
+                logger.warning(f"  SKIPPING: Audio too long ({audio_duration/60:.1f} min > {max_audio_duration/60:.1f} min limit)")
+                logger.info(f"    Reason: Prevents CUDA OOM errors on T4 GPU")
                 return []
 
         # 2. Prepare transcript
-        print("  Preparing transcript...")
+        logger.info(f"  Preparing transcript...")
         full_transcript = row.get(transcript_field, '')
         if not full_transcript:
-            print(f"  No transcript found in '{transcript_field}', skipping")
+            logger.warning(f"  No transcript found in '{transcript_field}', skipping")
             return []
 
         # If using fulltext_file_str, clean it; otherwise use as-is
@@ -515,12 +516,12 @@ def process_single_vhp_row(
             transcript_text = full_transcript
 
         # Debug: Show what text we're passing to NFA
-        print(f"  Transcript field used: '{transcript_field}'")
-        print(f"  Transcript length: {len(transcript_text)} chars, {len(transcript_text.split())} words")
-        print(f"  First 150 chars: {transcript_text[:150]}...")
+        logger.info(f"  Transcript field: '{transcript_field}'")
+        logger.info(f"  Transcript length: {len(transcript_text)} chars, {len(transcript_text.split())} words")
+        logger.info(f"  First 150 chars: {transcript_text[:150]}...")
 
         # 3. Run NFA segmentation
-        print("  Running NFA segmentation...")
+        logger.info(f"  Running NFA segmentation...")
         segments = segment_audio_with_nfa(
             wav_path,
             transcript_text,
@@ -530,11 +531,11 @@ def process_single_vhp_row(
         )
 
         if not segments:
-            print("  No valid segments generated, skipping")
+            logger.warning(f"  No valid segments generated, skipping")
             return []
 
         # 4. Cut audio
-        print("  Cutting audio segments...")
+        logger.info(f"  Cutting audio segments...")
         segment_dir = os.path.join(temp_dir, "segments")
         segment_paths = cut_audio_segments(
             wav_path,
@@ -545,7 +546,7 @@ def process_single_vhp_row(
         )
 
         # 5. Upload to Azure
-        print("  Uploading segments to Azure...")
+        logger.info(f"  Uploading {len(segments)} segments to Azure...")
         blob_paths = upload_segments_to_blob(
             segment_paths,
             blob_prefix,
@@ -594,7 +595,7 @@ def process_single_vhp_row(
             })
             output_rows.append(new_row)
 
-        print(f"  Generated {len(output_rows)} segment rows")
+        logger.info(f"  ✅ SUCCESS: Generated {len(output_rows)} segments")
 
         # Cleanup temp files
         for path in segment_paths:
@@ -605,25 +606,25 @@ def process_single_vhp_row(
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            print(f"  Cleared CUDA cache after processing file")
+            logger.info(f"  Cleared CUDA cache")
 
         return output_rows
 
     except Exception as e:
-        print(f"\n{'='*80}")
-        print(f"ERROR: Failed to process ENTIRE FILE for row {row_idx}")
-        print(f"{'='*80}")
-        print(f"Error type: {type(e).__name__}")
-        print(f"Error message: {str(e)}")
-        print(f"\nThis means the full interview audio could not be segmented.")
-        print(f"Possible causes:")
-        print(f"  - Audio download failed")
-        print(f"  - NFA alignment failed (check transcript quality)")
-        print(f"  - Audio/transcript mismatch (different durations)")
-        print(f"\nFull traceback:")
+        logger.error(f"")
+        logger.error(f"{'='*80}")
+        logger.error(f"❌ ERROR: Failed to process row {row_idx}")
+        logger.error(f"{'='*80}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error(f"Possible causes:")
+        logger.error(f"  - Audio download failed")
+        logger.error(f"  - NFA alignment failed (check transcript quality)")
+        logger.error(f"  - Audio/transcript mismatch")
+        logger.error(f"Full traceback:")
         import traceback
-        traceback.print_exc()
-        print(f"{'='*80}\n")
+        logger.error(traceback.format_exc())
+        logger.error(f"{'='*80}")
         return []
 
     finally:
@@ -668,8 +669,8 @@ def process_parquet_batch(
     if sample_size is not None:
         df = df.head(sample_size)
 
-    print(f"Processing {len(df)} rows from {parquet_path}")
-    print("="*60)
+    logger.info(f"Processing {len(df)} rows from {parquet_path}")
+    logger.info("="*60)
 
     # Process each row
     all_output_rows = []
@@ -695,12 +696,13 @@ def process_parquet_batch(
     # Save to parquet
     df_output.to_parquet(output_parquet_path, index=False)
 
-    print("\n" + "="*60)
-    print("SEGMENTATION COMPLETE")
-    print("="*60)
-    print(f"Input rows: {len(df)}")
-    print(f"Output segments: {len(df_output)}")
-    print(f"Average segments per file: {len(df_output)/len(df):.1f}")
-    print(f"\nSaved to: {output_parquet_path}")
+    logger.info("")
+    logger.info("="*60)
+    logger.info("SEGMENTATION COMPLETE")
+    logger.info("="*60)
+    logger.info(f"Input rows: {len(df)}")
+    logger.info(f"Output segments: {len(df_output)}")
+    logger.info(f"Average segments per file: {len(df_output)/len(df):.1f}")
+    logger.info(f"Saved to: {output_parquet_path}")
 
     return df_output
