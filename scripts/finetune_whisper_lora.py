@@ -148,8 +148,8 @@ CONFIG = {
     "blob_prefix": "loc_vhp",
 
     # Sampling (set to None to use all data, or small number for testing)
-    "train_sample_size": None,  # Set to None for full training
-    "val_sample_size": 200,  # Limit val size to prevent OOM during evaluation
+    "train_sample_size": 2400,  # 80/20 split with val
+    "val_sample_size": 600,  # 80/20 split with train
     "random_seed": 42,
 
     # Output directory - follows convention: {dataset}-{model}-{task}-{infra}
