@@ -2,7 +2,7 @@ import argparse, yaml, jiwer, wandb, re
 from pathlib import Path
 import sys
 from pathlib import Path as P
-_scripts_dir = P(__file__).parent
+_scripts_dir = P(__file__).parent.parent  # Go up to scripts/ to find file_logger
 sys.path.insert(0, str(_scripts_dir))
 from file_logger import log, init_logger
 import pandas as pd

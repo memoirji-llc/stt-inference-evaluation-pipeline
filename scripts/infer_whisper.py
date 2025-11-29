@@ -21,11 +21,11 @@ import wandb
 
 # Import local modules (same directory)
 # Add scripts directory to path for imports
-_scripts_dir = Path(__file__).parent
-sys.path.insert(0, str(_scripts_dir))
-import azure_utils
-import data_loader
-from file_logger import log, init_logger
+_project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_project_root))
+from scripts.cloud import azure_utils
+from scripts.data import data_loader
+from scripts.file_logger import log, init_logger
 
 
 def run(cfg):

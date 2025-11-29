@@ -32,9 +32,9 @@ except ImportError as e:
 
 # Project imports
 import sys
-sys.path.insert(0, str(Path(__file__).parent))
-import azure_utils
-from evaluate import clean_raw_transcript_str
+sys.path.insert(0, str(Path(__file__).parent.parent))  # Add project root to path
+from scripts.cloud import azure_utils
+from scripts.eval.evaluate import clean_raw_transcript_str
 
 
 def prepare_text_for_segmentation(text: str, verbose: bool = False) -> List[str]:
@@ -529,7 +529,7 @@ def process_single_vhp_row(
 
     # 1. Download original audio from Azure
     print("  Downloading audio from Azure...")
-    import data_loader
+    from scripts.data import data_loader
     blob_paths = data_loader.get_blob_path_for_row(row, row_idx, blob_prefix)
 
     if not blob_paths:

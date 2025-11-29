@@ -18,8 +18,10 @@ from pydub import AudioSegment
 import soundfile as sf
 
 # Import existing utilities
-import azure_utils
-from evaluate import clean_raw_transcript_str
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))  # Add project root to path
+from scripts.cloud import azure_utils
+from scripts.eval.evaluate import clean_raw_transcript_str
 
 # Setup logger for this module
 logger = logging.getLogger(__name__)
@@ -450,7 +452,7 @@ def process_single_vhp_row(
     Returns:
         List of output row dicts for segmented parquet
     """
-    import data_loader
+    from scripts.data import data_loader
 
     # Extract blob_index
     blob_index = row.get('azure_blob_index', row_idx)

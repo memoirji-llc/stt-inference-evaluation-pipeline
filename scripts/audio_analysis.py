@@ -20,8 +20,12 @@ import io
 from pydub import AudioSegment
 from collections import Counter
 
+# Add project root to path for package imports
+_project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_project_root))
+
 # Azure blob utilities
-from azure_utils import list_blobs, download_blob_to_memory
+from scripts.cloud.azure_utils import list_blobs, download_blob_to_memory
 
 
 # Set Azure authentication environment variables
