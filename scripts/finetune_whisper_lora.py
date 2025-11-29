@@ -110,27 +110,20 @@ from transformers import (
 from peft import LoraConfig, get_peft_model
 from datasets import Dataset, Audio
 
-# IMPORTANT: Import HuggingFace evaluate BEFORE adding scripts to path
-import evaluate as hf_evaluate
-
 # Use script location defined at top of file
 SCRIPT_DIR = _SCRIPT_DIR
 PROJECT_ROOT = _PROJECT_ROOT
 
-# Add scripts directory to path for local imports
-sys.path.insert(0, str(SCRIPT_DIR))
+# Add project root to path for package imports
+sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import project modules (after sys.path modification)
-import data_loader
-import azure_utils
+# Import project modules using package structure (no name conflicts)
+from scripts.data import data_loader
+from scripts.cloud import azure_utils
+from scripts.eval.evaluate import clean_raw_transcript_str
 
-# Import specific function from local scripts/evaluate.py
-# Use importlib to avoid confusion with HuggingFace evaluate
-import importlib.util
-spec = importlib.util.spec_from_file_location("local_evaluate", SCRIPT_DIR / "evaluate.py")
-local_evaluate = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(local_evaluate)
-clean_raw_transcript_str = local_evaluate.clean_raw_transcript_str
+# Import HuggingFace evaluate (no conflict with scripts.eval.evaluate)
+import evaluate as hf_evaluate
 
 print(f"PyTorch: {torch.__version__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
