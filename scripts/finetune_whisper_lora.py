@@ -156,7 +156,7 @@ CONFIG = {
 
     # Sampling (set to None to use all data, or small number for testing)
     "train_sample_size": None,  # Set to None for full training
-    "val_sample_size": None,
+    "val_sample_size": 200,  # Limit val size to prevent OOM during evaluation
     "random_seed": 42,
 
     # Output directory - follows convention: {dataset}-{model}-{task}-{infra}
@@ -287,169 +287,210 @@ print(f"\nTrain: {len(df_train)} samples")
 print(f"Val: {len(df_val)} samples")
 
 # %%
-def prepare_hf_dataset(df: pd.DataFrame, blob_prefix: str, max_duration_sec: int = 30):
+import gc
+from datasets import concatenate_datasets
+
+def process_single_audio(row, idx, blob_prefix, is_segmented, max_duration_sec=30):
     """
-    Convert DataFrame to HuggingFace Dataset with audio and cleaned transcripts.
-    
-    Handles both:
-    - Segmented parquets (with segmented_audio_url column) - uses pre-segmented audio
-    - Original parquets (without segmented_audio_url) - downloads and filters by duration
-    
-    Args:
-        df: DataFrame with VHP data
-        blob_prefix: Azure blob prefix
-        max_duration_sec: Maximum audio duration in seconds (only for non-segmented data)
+    Process a single audio sample. Returns dict with audio array and transcript, or None if failed.
     """
     from tempfile import NamedTemporaryFile
     from pydub import AudioSegment
     import librosa
-    import time
-    
-    # Check if this is a segmented parquet
+
+    # Get transcript
+    if is_segmented:
+        transcript = row.get('segmented_audio_transcript', '')
+    else:
+        raw_transcript = row.get('fulltext_file_str', '')
+        transcript = clean_raw_transcript_str(raw_transcript)
+
+    if not transcript.strip():
+        return None
+
+    # Get blob path
+    if is_segmented:
+        blob_path = row.get('segmented_audio_url', '')
+        if not blob_path:
+            return None
+        blob_path_candidates = [blob_path]
+    else:
+        blob_path_candidates = data_loader.get_blob_path_for_row(row, idx, blob_prefix)
+        if not blob_path_candidates:
+            return None
+
+    # Download and process audio
+    for blob_path in blob_path_candidates:
+        try:
+            if not azure_utils.blob_exists(blob_path):
+                continue
+
+            audio_bytes = azure_utils.download_blob_to_memory(blob_path)
+
+            # Convert to WAV 16kHz mono
+            with NamedTemporaryFile(suffix=Path(blob_path).suffix, delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            audio_seg = AudioSegment.from_file(tmp_path)
+            audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
+
+            wav_path = tmp_path.replace(Path(blob_path).suffix, '.wav')
+            audio_seg.export(wav_path, format='wav')
+
+            # Load as numpy array
+            audio_data, sr = librosa.load(wav_path, sr=16000)
+
+            # Cleanup temp files immediately
+            os.unlink(tmp_path)
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+
+            # Free audio_seg memory
+            del audio_seg, audio_bytes
+
+            # For non-segmented data, skip if too long
+            if not is_segmented:
+                if len(audio_data) / 16000 > max_duration_sec:
+                    del audio_data
+                    return None
+
+            return {
+                "audio": {"array": audio_data, "sampling_rate": 16000},
+                "sentence": transcript
+            }
+        except Exception as e:
+            print(f"  ERROR processing {blob_path}: {e}")
+            continue
+
+    return None
+
+
+def prepare_hf_dataset_batched(df: pd.DataFrame, blob_prefix: str, save_path: str, batch_size: int = 100):
+    """
+    Memory-efficient dataset preparation: process in batches and save to disk.
+
+    Args:
+        df: DataFrame with VHP data
+        blob_prefix: Azure blob prefix
+        save_path: Path to save the processed dataset
+        batch_size: Number of samples to process before saving to disk
+    """
+    import shutil
+
     is_segmented = 'segmented_audio_url' in df.columns
-    print(f"[DEBUG] prepare_hf_dataset: is_segmented={is_segmented}, df size={len(df)}")
-    
-    records = []
-    skipped_too_long = 0
-    
-    for idx, row in df.iterrows():
-        start_time = time.time()
-        print(f"\n[DEBUG] Processing row {idx}...")
-        
-        # Get transcript
-        if is_segmented:
-            # Segmented parquet uses segmented_audio_transcript column
-            transcript = row.get('segmented_audio_transcript', '')
-            print(f"  - Using segmented_audio_transcript: {len(transcript)} chars")
+    print(f"[MEMORY-EFFICIENT] Processing {len(df)} samples in batches of {batch_size}")
+    print(f"[MEMORY-EFFICIENT] is_segmented={is_segmented}")
+    print(f"[MEMORY-EFFICIENT] Will save to: {save_path}")
+
+    # Clean up any existing partial dataset
+    if os.path.exists(save_path):
+        shutil.rmtree(save_path)
+
+    total_processed = 0
+    total_skipped = 0
+    batch_datasets = []
+    current_batch = []
+
+    for i, (idx, row) in enumerate(df.iterrows()):
+        result = process_single_audio(row, idx, blob_prefix, is_segmented)
+
+        if result is not None:
+            current_batch.append(result)
+            total_processed += 1
         else:
-            # Original parquet uses fulltext_file_str with cleaning
-            raw_transcript = row.get('fulltext_file_str', '')
-            transcript = clean_raw_transcript_str(raw_transcript)
-            print(f"  - Cleaned transcript: {len(transcript)} chars")
-        
-        if not transcript.strip():
-            print(f"  - SKIP: empty transcript")
-            continue
-        
-        # Get blob path
-        if is_segmented:
-            # Use pre-segmented audio path
-            blob_path = row.get('segmented_audio_url', '')
-            if not blob_path:
-                print(f"  - SKIP: no segmented_audio_url")
-                continue
-            blob_path_candidates = [blob_path]
-            print(f"  - Blob path: {blob_path}")
-        else:
-            # Use original full-length audio path
-            blob_path_candidates = data_loader.get_blob_path_for_row(row, idx, blob_prefix)
-            if not blob_path_candidates:
-                print(f"  - SKIP: no blob path")
-                continue
-            print(f"  - Blob path candidates: {blob_path_candidates}")
-        
-        # Download audio from Azure blob
-        audio_data = None
-        for blob_path in blob_path_candidates:
-            try:
-                print(f"  - Checking if blob exists: {blob_path}")
-                if not azure_utils.blob_exists(blob_path):
-                    print(f"  - Blob does not exist, trying next...")
-                    continue
-                
-                print(f"  - Downloading blob...")
-                download_start = time.time()
-                audio_bytes = azure_utils.download_blob_to_memory(blob_path)
-                print(f"  - Downloaded {len(audio_bytes)} bytes in {time.time() - download_start:.2f}s")
-                
-                # Convert to WAV 16kHz mono using pydub
-                with NamedTemporaryFile(suffix=Path(blob_path).suffix, delete=False) as tmp:
-                    tmp.write(audio_bytes)
-                    tmp_path = tmp.name
-                
-                print(f"  - Converting audio to 16kHz mono WAV...")
-                convert_start = time.time()
-                audio_seg = AudioSegment.from_file(tmp_path)
-                audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
-                
-                # Export to wav
-                wav_path = tmp_path.replace(Path(blob_path).suffix, '.wav')
-                audio_seg.export(wav_path, format='wav')
-                print(f"  - Conversion done in {time.time() - convert_start:.2f}s")
-                
-                # Load as numpy array
-                print(f"  - Loading audio with librosa...")
-                load_start = time.time()
-                audio_data, sr = librosa.load(wav_path, sr=16000)
-                print(f"  - Loaded audio: {len(audio_data)} samples in {time.time() - load_start:.2f}s")
-                
-                # For non-segmented data, skip if audio is too long
-                if not is_segmented:
-                    audio_duration_sec = len(audio_data) / 16000
-                    if audio_duration_sec > max_duration_sec:
-                        print(f"  - SKIP: audio too long ({audio_duration_sec:.1f}s > {max_duration_sec}s)")
-                        skipped_too_long += 1
-                        audio_data = None
-                        os.unlink(tmp_path)
-                        if os.path.exists(wav_path):
-                            os.unlink(wav_path)
-                        break
-                
-                # Cleanup temp files
-                os.unlink(tmp_path)
-                if os.path.exists(wav_path):
-                    os.unlink(wav_path)
-                
-                print(f"  - SUCCESS: Processed in {time.time() - start_time:.2f}s total")
-                break
-            except Exception as e:
-                print(f"  - ERROR downloading {blob_path}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-        
-        if audio_data is None:
-            print(f"  - SKIP: No valid audio data obtained")
-            continue
-        
-        records.append({
-            "audio": {"array": audio_data, "sampling_rate": 16000},
-            "sentence": transcript
+            total_skipped += 1
+
+        # Progress update every 50 samples
+        if (i + 1) % 50 == 0:
+            print(f"[MEMORY-EFFICIENT] Progress: {i + 1}/{len(df)} (processed: {total_processed}, skipped: {total_skipped})")
+
+        # Save batch to disk when full
+        if len(current_batch) >= batch_size:
+            print(f"[MEMORY-EFFICIENT] Saving batch of {len(current_batch)} samples...")
+            batch_dataset = Dataset.from_dict({
+                "audio": [r["audio"] for r in current_batch],
+                "sentence": [r["sentence"] for r in current_batch]
+            })
+            batch_dataset = batch_dataset.cast_column("audio", Audio(sampling_rate=16000))
+            batch_datasets.append(batch_dataset)
+
+            # Free memory
+            del current_batch
+            gc.collect()
+            current_batch = []
+            print(f"[MEMORY-EFFICIENT] Batch saved, memory freed")
+
+    # Save remaining samples
+    if current_batch:
+        print(f"[MEMORY-EFFICIENT] Saving final batch of {len(current_batch)} samples...")
+        batch_dataset = Dataset.from_dict({
+            "audio": [r["audio"] for r in current_batch],
+            "sentence": [r["sentence"] for r in current_batch]
         })
-        
-        print(f"  - Added to records (total: {len(records)})")
-    
-    print(f"\n[DEBUG] Final summary:")
-    print(f"  - Total valid samples: {len(records)}")
-    if not is_segmented:
-        print(f"  - Skipped (too long): {skipped_too_long}")
-    
-    if len(records) == 0:
-        if is_segmented:
-            raise ValueError("No valid segmented samples found. Check segmented_audio_url and segmented_audio_transcript columns.")
-        else:
-            raise ValueError(f"No samples found with duration <= {max_duration_sec}s. "
-                           "VHP files are typically 30-60+ minute interviews. "
-                           "Use NeMo Forced Aligner to create segmented parquets.")
-    
-    # Create HuggingFace dataset
-    print(f"[DEBUG] Creating HuggingFace dataset...")
-    dataset = Dataset.from_dict({
-        "audio": [r["audio"] for r in records],
-        "sentence": [r["sentence"] for r in records]
-    })
-    dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
-    print(f"[DEBUG] HuggingFace dataset created successfully")
-    
-    return dataset
+        batch_dataset = batch_dataset.cast_column("audio", Audio(sampling_rate=16000))
+        batch_datasets.append(batch_dataset)
+        del current_batch
+        gc.collect()
+
+    if not batch_datasets:
+        raise ValueError("No valid samples found!")
+
+    # Concatenate all batches
+    print(f"[MEMORY-EFFICIENT] Concatenating {len(batch_datasets)} batches...")
+    final_dataset = concatenate_datasets(batch_datasets)
+
+    # Free batch datasets
+    del batch_datasets
+    gc.collect()
+
+    # Save to disk
+    print(f"[MEMORY-EFFICIENT] Saving final dataset to disk: {save_path}")
+    final_dataset.save_to_disk(save_path)
+
+    # Free the in-memory dataset
+    del final_dataset
+    gc.collect()
+
+    print(f"[MEMORY-EFFICIENT] Complete! Processed: {total_processed}, Skipped: {total_skipped}")
+
+    # Load from disk (memory-mapped)
+    from datasets import load_from_disk
+    return load_from_disk(save_path)
+
 
 # %%
-# Prepare HuggingFace datasets
-print("Preparing training dataset (downloading audio from Azure)...")
-train_dataset = prepare_hf_dataset(df_train, CONFIG["blob_prefix"])
+# Prepare datasets with memory-efficient batch processing
+CACHE_DIR = PROJECT_ROOT / "outputs" / "dataset_cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-print("\nPreparing validation dataset...")
-val_dataset = prepare_hf_dataset(df_val, CONFIG["blob_prefix"])
+print("=" * 60)
+print("PREPARING TRAINING DATASET (memory-efficient batch processing)")
+print("=" * 60)
+train_dataset = prepare_hf_dataset_batched(
+    df_train,
+    CONFIG["blob_prefix"],
+    save_path=str(CACHE_DIR / "train_dataset"),
+    batch_size=100
+)
+
+# Free df_train memory
+del df_train
+gc.collect()
+
+print("\n" + "=" * 60)
+print("PREPARING VALIDATION DATASET")
+print("=" * 60)
+val_dataset = prepare_hf_dataset_batched(
+    df_val,
+    CONFIG["blob_prefix"],
+    save_path=str(CACHE_DIR / "val_dataset"),
+    batch_size=100
+)
+
+# Free df_val memory
+del df_val
+gc.collect()
 
 print(f"\nFinal dataset sizes:")
 print(f"  Train: {len(train_dataset)}")
@@ -565,15 +606,20 @@ def prepare_dataset(batch):
         "labels": labels
     }
 
-print("Preprocessing training data...")
+print("=" * 60)
+print("PREPROCESSING TRAINING DATA (converting audio to mel spectrograms)")
+print("=" * 60)
 print(f"Dataset size: {len(train_dataset)} samples")
+
+# Keep reference to raw audio dataset for cleanup
+train_dataset_raw = train_dataset
 
 # Process manually to avoid multiprocessing crashes
 processed_train = {"input_features": [], "labels": []}
-for i in range(len(train_dataset)):
-    # if i == 0:  # Only print for first sample to avoid spam
-    #     print(f"\n[DTYPE DEBUG] Processing first training sample...")
-    sample = train_dataset[i]
+for i in range(len(train_dataset_raw)):
+    if (i + 1) % 100 == 0:
+        print(f"[PREPROCESS] Training progress: {i + 1}/{len(train_dataset_raw)}")
+    sample = train_dataset_raw[i]
     processed = prepare_dataset(sample)
     processed_train["input_features"].append(processed["input_features"])
     processed_train["labels"].append(processed["labels"])
@@ -582,30 +628,36 @@ for i in range(len(train_dataset)):
 import datasets
 train_dataset = datasets.Dataset.from_dict(processed_train)
 print(f"Training preprocessing complete: {len(train_dataset)} samples")
-print(f"Columns: {train_dataset.column_names}")
 
-# Check dtype of stored data
-# sample_feature = train_dataset[0]["input_features"]
-# if isinstance(sample_feature, list):
-#     print(f"[DTYPE DEBUG] Stored as list (will be converted to tensor by collator)")
-# else:
-#     print(f"[DTYPE DEBUG] Stored train dataset dtype: {torch.tensor(sample_feature).dtype}")
+# Free memory: delete raw audio dataset and processed dict
+del train_dataset_raw, processed_train
+gc.collect()
+print("[MEMORY] Freed raw training audio data")
 
-print("\n" + "="*60)
-print("Preprocessing validation data...")
+print("\n" + "=" * 60)
+print("PREPROCESSING VALIDATION DATA")
+print("=" * 60)
+
+# Keep reference for cleanup
+val_dataset_raw = val_dataset
 
 processed_val = {"input_features": [], "labels": []}
-for i in range(len(val_dataset)):
-    # if i == 0:  # Only print for first sample
-    #     print(f"\n[DTYPE DEBUG] Processing first validation sample...")
-    sample = val_dataset[i]
+for i in range(len(val_dataset_raw)):
+    if (i + 1) % 50 == 0:
+        print(f"[PREPROCESS] Validation progress: {i + 1}/{len(val_dataset_raw)}")
+    sample = val_dataset_raw[i]
     processed = prepare_dataset(sample)
     processed_val["input_features"].append(processed["input_features"])
     processed_val["labels"].append(processed["labels"])
 
 val_dataset = datasets.Dataset.from_dict(processed_val)
 print(f"Validation preprocessing complete: {len(val_dataset)} samples")
-print(f"Columns: {val_dataset.column_names}")
+
+# Free memory
+del val_dataset_raw, processed_val
+gc.collect()
+print("[MEMORY] Freed raw validation audio data")
+
 print(f"\nAll preprocessing complete!")
 
 # %%
