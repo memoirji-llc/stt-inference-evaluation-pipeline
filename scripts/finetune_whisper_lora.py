@@ -88,9 +88,13 @@ import sys
 import os
 from pathlib import Path
 
+# Get script location for resolving paths
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent
+
 # Load Azure credentials from .env file
 from dotenv import load_dotenv
-load_dotenv(dotenv_path='../credentials/creds.env')
+load_dotenv(dotenv_path=_PROJECT_ROOT / 'credentials/creds.env')
 
 import torch
 import pandas as pd
@@ -109,17 +113,21 @@ from datasets import Dataset, Audio
 # IMPORTANT: Import HuggingFace evaluate BEFORE adding scripts to path
 import evaluate as hf_evaluate
 
-# NOW add scripts directory to path for local imports
-sys.path.insert(0, str(Path.cwd().parent / "scripts"))
+# Use script location defined at top of file
+SCRIPT_DIR = _SCRIPT_DIR
+PROJECT_ROOT = _PROJECT_ROOT
+
+# Add scripts directory to path for local imports
+sys.path.insert(0, str(SCRIPT_DIR))
 
 # Import project modules (after sys.path modification)
 import data_loader
 import azure_utils
 
 # Import specific function from local scripts/evaluate.py
-# Use importlib to avoid confusion
+# Use importlib to avoid confusion with HuggingFace evaluate
 import importlib.util
-spec = importlib.util.spec_from_file_location("local_evaluate", Path.cwd().parent / "scripts" / "evaluate.py")
+spec = importlib.util.spec_from_file_location("local_evaluate", SCRIPT_DIR / "evaluate.py")
 local_evaluate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(local_evaluate)
 clean_raw_transcript_str = local_evaluate.clean_raw_transcript_str
@@ -139,20 +147,20 @@ if torch.cuda.is_available():
 # =============================================================================
 
 CONFIG = {
-    # Data paths - VHP parquet files (same naming as data splits)
-    "train_parquet": "../data/raw/loc/veterans_history_project_resources_pre2010_train.parquet",
-    "val_parquet": "../data/raw/loc/veterans_history_project_resources_pre2010_val.parquet",
-    
+    # Data paths - VHP parquet files (use PROJECT_ROOT for absolute paths)
+    "train_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_train_nfa_segmented.parquet"),
+    "val_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_val_nfa_segmented.parquet"),
+
     # Azure blob settings (same as inference configs)
     "blob_prefix": "loc_vhp",
-    
+
     # Sampling (set to None to use all data, or small number for testing)
-    "train_sample_size": 100,  # Set to None for full training
-    "val_sample_size": 20,
+    "train_sample_size": None,  # Set to None for full training
+    "val_sample_size": None,
     "random_seed": 42,
-    
+
     # Output directory - follows convention: {dataset}-{model}-{task}-{infra}
-    "output_dir": "../outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000",
+    "output_dir": str(PROJECT_ROOT / "outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000"),
     
     # Model - using HuggingFace transformers (not faster-whisper, which is inference-only)
     # Note: For inference we use faster-whisper, but for fine-tuning we need the original HF model
