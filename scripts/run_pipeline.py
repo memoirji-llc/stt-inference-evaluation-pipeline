@@ -73,7 +73,7 @@ def main():
         if use_parquet_workflow:
             # New workflow: evaluate using parquet
             eval_cmd = [
-                "uv", "run", "python", "scripts/evaluate.py",
+                "uv", "run", "python", "scripts/eval/evaluate.py",
                 "--config", config_path,
                 "--inference_results", str(paths["inference_results"]),
                 "--parquet", args.parquet,
@@ -85,7 +85,7 @@ def main():
                 continue
 
             eval_cmd = [
-                "uv", "run", "python", "scripts/evaluate.py",
+                "uv", "run", "python", "scripts/eval/evaluate.py",
                 "--config", config_path,
                 "--hyp", str(paths["hyp_path"]),
                 "--ref", args.ref,
