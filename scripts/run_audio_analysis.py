@@ -25,11 +25,12 @@ import pyloudnorm as pyln
 from tqdm import tqdm
 import io
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import gc
 import os
 import psutil
 from collections import Counter
+import multiprocessing as mp
 
 # Azure blob utilities
 from cloud.azure_utils import list_blobs, download_blob_to_memory
@@ -51,20 +52,25 @@ if device.type == 'cuda':
     torch.backends.cudnn.benchmark = True
     print("Enabled: TF32 matmul, TF32 cudnn, cudnn benchmark")
 
-# Processing configuration - CONSERVATIVE to avoid OOM
+# Processing configuration - OPTIMIZED for parallel CPU + GPU
 # The VHP files are large (some 30+ min audio = 100MB+ each)
-BATCH_SIZE = 32           # GPU batch - reduced from 128
-DOWNLOAD_WORKERS = 50     # Parallel downloads - reduced from 100
-DOWNLOAD_BATCH_SIZE = 100 # Files in RAM at once - reduced from 400
+BATCH_SIZE = 32           # GPU batch size
+DOWNLOAD_WORKERS = 50     # Parallel downloads
+DOWNLOAD_BATCH_SIZE = 100 # Files in RAM at once
 TARGET_SR = 16000
+
+# Parallel CPU decoding - this is the main bottleneck fix
+# 8 workers × ~60MB per file = ~500MB extra RAM (safe on 200GB+ system)
+DECODE_WORKERS = 8
 
 # Memory threshold - trigger GC if above this (in GB)
 RAM_THRESHOLD_GB = 40
 
 print(f"\nConfiguration:")
-print(f"  Batch size: {BATCH_SIZE} files")
+print(f"  GPU batch size: {BATCH_SIZE} files")
 print(f"  Download workers: {DOWNLOAD_WORKERS}")
 print(f"  Download batch size: {DOWNLOAD_BATCH_SIZE}")
+print(f"  CPU decode workers: {DECODE_WORKERS}")
 print(f"  RAM threshold: {RAM_THRESHOLD_GB} GB")
 
 
@@ -92,9 +98,57 @@ def load_audio_to_tensor(audio_bytes, target_sr=16000):
     return torch.from_numpy(waveform).float(), target_sr
 
 
+def _decode_single_audio(args):
+    """Worker function for parallel audio decoding. Returns (audio_id, waveform_numpy, error)."""
+    audio_id, audio_bytes, target_sr = args
+    try:
+        from pydub import AudioSegment
+        audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        audio_segment = audio_segment.set_channels(1)
+        audio_segment = audio_segment.set_frame_rate(target_sr)
+
+        samples = np.array(audio_segment.get_array_of_samples())
+
+        if audio_segment.sample_width == 2:
+            waveform = samples.astype(np.float32) / 32768.0
+        elif audio_segment.sample_width == 4:
+            waveform = samples.astype(np.float32) / 2147483648.0
+        else:
+            waveform = samples.astype(np.float32)
+
+        return (audio_id, waveform, None)
+    except Exception as e:
+        return (audio_id, None, str(e))
+
+
+def decode_audio_parallel(audio_data_list, target_sr=16000, max_workers=8):
+    """Decode multiple audio files in parallel using ProcessPoolExecutor."""
+    # Prepare args for worker
+    args_list = [(audio_id, audio_bytes, target_sr) for audio_id, audio_bytes in audio_data_list]
+
+    decoded = []
+    errors = []
+
+    # Use ProcessPoolExecutor for CPU-bound pydub work
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_decode_single_audio, args): args[0] for args in args_list}
+
+        for future in as_completed(futures):
+            audio_id, waveform, error = future.result()
+            if error:
+                errors.append({
+                    'audio_id': audio_id,
+                    'status': 'error',
+                    'error_message': f"Decode error: {error}"
+                })
+            else:
+                decoded.append((audio_id, torch.from_numpy(waveform).float()))
+
+    return decoded, errors
+
+
 def batch_compute_spectrogram(waveforms, sr, n_fft=2048, hop_length=512):
-    """Compute spectrograms for batch of waveforms on GPU."""
-    results = []
+    """Compute spectrograms for batch of waveforms on GPU - properly batched."""
     freqs = torch.linspace(0, sr/2, n_fft//2 + 1, device=device)
 
     spec_transform = torchaudio.transforms.Spectrogram(
@@ -108,22 +162,32 @@ def batch_compute_spectrogram(waveforms, sr, n_fft=2048, hop_length=512):
         normalized=False
     ).to(device)
 
-    for wv in waveforms:
-        wv_gpu = wv.to(device)
-        min_length = n_fft
-        if len(wv_gpu) < min_length:
-            pad_needed = min_length - len(wv_gpu)
-            wv_gpu = torch.nn.functional.pad(wv_gpu, (0, pad_needed), mode='constant', value=0)
+    # Find max length for padding
+    max_len = max(len(wv) for wv in waveforms)
+    max_len = max(max_len, n_fft)  # Ensure at least n_fft
 
-        spec = spec_transform(wv_gpu)
-        mag = torch.abs(spec)
-        results.append((mag, freqs))
+    # Pad all waveforms to same length and stack into batch
+    padded_waveforms = []
+    for wv in waveforms:
+        if len(wv) < max_len:
+            wv = torch.nn.functional.pad(wv, (0, max_len - len(wv)), mode='constant', value=0)
+        padded_waveforms.append(wv)
+
+    # Stack into batch tensor: (batch_size, samples)
+    batch_tensor = torch.stack(padded_waveforms).to(device)
+
+    # Compute spectrograms for entire batch at once
+    specs = spec_transform(batch_tensor)  # Shape: (batch, freq_bins, time_frames)
+    mags = torch.abs(specs)
+
+    # Return as list of (mag, freqs) tuples for compatibility
+    results = [(mags[i], freqs) for i in range(len(waveforms))]
 
     return results
 
 
 def snr_cal_batch(waveform, sr):
-    """Calculate SNR matching librosa.feature.rms()."""
+    """Calculate SNR using vectorized unfold - no for-loops."""
     frame_length = 2048
     hop_length = 512
 
@@ -132,28 +196,17 @@ def snr_cal_batch(waveform, sr):
         waveform = torch.nn.functional.pad(waveform, (0, pad_needed), mode='constant', value=0)
 
     pad_length = frame_length // 2
-    waveform_2d = waveform.unsqueeze(0)
-    waveform_padded = torch.nn.functional.pad(waveform_2d, (pad_length, pad_length), mode='reflect').squeeze(0)
+    waveform_padded = torch.nn.functional.pad(waveform.unsqueeze(0), (pad_length, pad_length), mode='reflect').squeeze(0)
 
-    num_frames = 1 + (len(waveform_padded) - frame_length) // hop_length
+    # Vectorized frame extraction using unfold
+    frames = waveform_padded.unfold(0, frame_length, hop_length)  # Shape: (num_frames, frame_length)
 
-    if num_frames <= 0:
+    if frames.shape[0] == 0:
         return 0.0
 
-    rms_values = []
-    for i in range(num_frames):
-        start = i * hop_length
-        end = start + frame_length
-        if end > len(waveform_padded):
-            break
-        frame = waveform_padded[start:end]
-        rms = torch.sqrt(torch.mean(frame ** 2))
-        rms_values.append(rms)
+    # Vectorized RMS calculation across all frames at once
+    rms_tensor = torch.sqrt(torch.mean(frames ** 2, dim=1))
 
-    if len(rms_values) == 0:
-        return 0.0
-
-    rms_tensor = torch.stack(rms_values)
     noise_frames = int(0.5 * sr / hop_length)
 
     if noise_frames > 0 and noise_frames < len(rms_tensor):
@@ -195,7 +248,7 @@ def spectral_flatness_batch(spec_mag):
 
 
 def zcr_batch(waveform):
-    """Calculate zero crossing rate."""
+    """Calculate zero crossing rate using vectorized unfold - no for-loops."""
     frame_length = 2048
     hop_length = 512
 
@@ -206,35 +259,24 @@ def zcr_batch(waveform):
     pad_length = frame_length // 2
     waveform_padded = torch.nn.functional.pad(waveform, (pad_length, pad_length), mode='constant', value=0)
 
-    signs = torch.sign(waveform_padded)
-    signs[signs == 0] = 0
-    sign_changes = torch.abs(torch.diff(signs)) > 0
+    # Vectorized frame extraction
+    frames = waveform_padded.unfold(0, frame_length, hop_length)  # Shape: (num_frames, frame_length)
 
-    num_frames = 1 + (len(waveform_padded) - frame_length) // hop_length
-
-    if num_frames <= 0:
+    if frames.shape[0] == 0:
         return 0.0, 0.0
 
-    zcr_values = []
-    for i in range(num_frames):
-        start = i * hop_length
-        end = start + frame_length - 1
-        if end > len(sign_changes):
-            break
-        frame = sign_changes[start:end]
-        zcr = torch.sum(frame.float()) / (frame_length - 1)
-        zcr_values.append(zcr)
+    # Vectorized sign change calculation per frame
+    signs = torch.sign(frames)
+    # Diff along frame dimension (axis=1), then count changes
+    sign_changes = (torch.abs(torch.diff(signs, dim=1)) > 0).float()
+    zcr_per_frame = torch.sum(sign_changes, dim=1) / (frame_length - 1)
 
-    if len(zcr_values) == 0:
-        return 0.0, 0.0
-
-    zcr_tensor = torch.stack(zcr_values)
-    return torch.mean(zcr_tensor).item(), torch.var(zcr_tensor).item()
+    return torch.mean(zcr_per_frame).item(), torch.var(zcr_per_frame).item()
 
 
 def loudness_cal(waveform, sr):
     """Calculate loudness (LUFS)."""
-    wv_cpu = waveform.cpu().numpy()
+    wv_cpu = waveform.cpu().numpy() if torch.is_tensor(waveform) else waveform
     min_length = int(0.4 * sr)
     if len(wv_cpu) < min_length:
         wv_cpu = np.pad(wv_cpu, (0, min_length - len(wv_cpu)), mode='constant', constant_values=0)
@@ -242,6 +284,30 @@ def loudness_cal(waveform, sr):
     meter = pyln.Meter(sr)
     loudness = meter.integrated_loudness(wv_cpu)
     return float(loudness)
+
+
+def _loudness_worker(args):
+    """Worker function for parallel loudness calculation."""
+    waveform_np, sr = args
+    try:
+        min_length = int(0.4 * sr)
+        if len(waveform_np) < min_length:
+            waveform_np = np.pad(waveform_np, (0, min_length - len(waveform_np)), mode='constant', constant_values=0)
+        meter = pyln.Meter(sr)
+        return meter.integrated_loudness(waveform_np)
+    except Exception:
+        return -70.0  # Return very quiet value on error
+
+
+def loudness_cal_parallel(waveforms, sr, max_workers=8):
+    """Calculate loudness for multiple waveforms in parallel."""
+    # Convert tensors to numpy
+    waveforms_np = [(wv.cpu().numpy() if torch.is_tensor(wv) else wv, sr) for wv in waveforms]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(_loudness_worker, waveforms_np))
+
+    return results
 
 
 def low_frequency_energy_batch(spec_mag, freqs, sr, cutoff_hz=80):
@@ -260,28 +326,31 @@ def low_frequency_energy_batch(spec_mag, freqs, sr, cutoff_hz=80):
 # ============================================================================
 
 def analyze_audio_batch_gpu(audio_data_list):
-    """Analyze a batch of audio files on GPU."""
+    """Analyze a batch of audio files on GPU with parallel CPU decoding."""
     results = []
-    waveforms = []
-    audio_ids = []
 
-    for audio_id, audio_bytes in audio_data_list:
-        try:
-            wv, sr = load_audio_to_tensor(audio_bytes, target_sr=TARGET_SR)
-            waveforms.append(wv)
-            audio_ids.append(audio_id)
-        except Exception as e:
-            results.append({
-                'audio_id': audio_id,
-                'status': 'error',
-                'error_message': f"Load error: {str(e)}"
-            })
+    # PARALLEL DECODE: This was the main bottleneck - pydub is CPU-bound
+    # Using ProcessPoolExecutor decodes 8 files simultaneously
+    decoded_waveforms, decode_errors = decode_audio_parallel(
+        audio_data_list,
+        target_sr=TARGET_SR,
+        max_workers=DECODE_WORKERS
+    )
+    results.extend(decode_errors)
 
-    if not waveforms:
+    if not decoded_waveforms:
         return results
 
+    audio_ids = [aid for aid, _ in decoded_waveforms]
+    waveforms = [wv for _, wv in decoded_waveforms]
+
+    # BATCHED SPECTROGRAM: Process all waveforms on GPU in single batch
     spec_results = batch_compute_spectrogram(waveforms, TARGET_SR)
 
+    # PARALLEL LOUDNESS: CPU-bound pyloudnorm in parallel
+    loudness_values = loudness_cal_parallel(waveforms, TARGET_SR, max_workers=DECODE_WORKERS)
+
+    # Process remaining metrics (already vectorized SNR/ZCR)
     for i, (audio_id, wv) in enumerate(zip(audio_ids, waveforms)):
         try:
             spec_mag, freqs = spec_results[i]
@@ -294,7 +363,7 @@ def analyze_audio_batch_gpu(audio_data_list):
             flatness = spectral_flatness_batch(spec_mag)
             zcr_mean, zcr_var = zcr_batch(wv_gpu)
             low_freq_ratio = low_frequency_energy_batch(spec_mag, freqs, TARGET_SR)
-            loudness = loudness_cal(wv, TARGET_SR)
+            loudness = loudness_values[i]
 
             results.append({
                 'audio_id': audio_id,
@@ -318,7 +387,7 @@ def analyze_audio_batch_gpu(audio_data_list):
                 'error_message': f"Processing error: {str(e)}"
             })
 
-    del waveforms, spec_results
+    del waveforms, spec_results, decoded_waveforms
     if device.type == 'cuda':
         torch.cuda.empty_cache()
 
@@ -456,6 +525,7 @@ def main():
     print(f"\nProcessing {total_files} files...")
     print(f"Download batch size: {DOWNLOAD_BATCH_SIZE}")
     print(f"GPU batch size: {BATCH_SIZE}")
+    print(f"CPU decode workers: {DECODE_WORKERS} (parallel pydub)")
     print("="*60)
 
     start_time = time.time()
@@ -474,11 +544,20 @@ def main():
         ram_before = get_ram_usage_gb()
         print(f"RAM usage: {ram_before:.1f} GB")
 
-        print(f"Processing on GPU...")
+        print(f"Processing (parallel decode + GPU metrics)...")
         for j in range(0, len(audio_data), BATCH_SIZE):
             gpu_batch = audio_data[j:j + BATCH_SIZE]
+            batch_num = j // BATCH_SIZE + 1
+            total_batches = (len(audio_data) + BATCH_SIZE - 1) // BATCH_SIZE
+            print(f"  GPU batch {batch_num}/{total_batches} ({len(gpu_batch)} files)...", end=" ", flush=True)
+
+            batch_start = time.time()
             batch_results = analyze_audio_batch_gpu(gpu_batch)
+            batch_time = time.time() - batch_start
+
             all_results.extend(batch_results)
+            success = sum(1 for r in batch_results if r.get('status') == 'success')
+            print(f"done in {batch_time:.1f}s ({success} ok)")
 
             # Clear processed batch from memory immediately
             for k in range(len(gpu_batch)):
