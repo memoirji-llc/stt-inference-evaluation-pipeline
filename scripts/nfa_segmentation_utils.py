@@ -13,7 +13,7 @@ import subprocess
 import pandas as pd
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from pydub import AudioSegment
 import soundfile as sf
 
@@ -345,7 +345,7 @@ def cut_audio_segments(
     output_dir: str,
     base_name: str,
     max_duration: float = 30.0
-) -> List[str]:
+) -> Tuple[List[str], List[int]]:
     """
     Cut audio file into segments based on NFA timestamps.
 
@@ -357,7 +357,9 @@ def cut_audio_segments(
         max_duration: Maximum segment duration
 
     Returns:
-        List of paths to created audio segment files
+        Tuple of (segment_paths, valid_indices) where:
+            - segment_paths: List of paths to created audio segment files
+            - valid_indices: List of original segment indices that were kept (not skipped)
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -365,6 +367,7 @@ def cut_audio_segments(
     audio = AudioSegment.from_file(audio_path)
 
     segment_paths = []
+    valid_indices = []
     for i, seg in enumerate(segments):
         start_ms = int(seg["start"] * 1000)
         end_ms = int(seg["end"] * 1000)
@@ -383,8 +386,9 @@ def cut_audio_segments(
         segment_audio.export(output_path, format="wav")
 
         segment_paths.append(output_path)
+        valid_indices.append(i)
 
-    return segment_paths
+    return segment_paths, valid_indices
 
 
 def upload_segments_to_blob(
@@ -541,7 +545,7 @@ def process_single_vhp_row(
         # 4. Cut audio
         logger.info(f"  Cutting audio segments...")
         segment_dir = os.path.join(temp_dir, "segments")
-        segment_paths = cut_audio_segments(
+        segment_paths, valid_indices = cut_audio_segments(
             wav_path,
             segments,
             segment_dir,
@@ -550,7 +554,8 @@ def process_single_vhp_row(
         )
 
         # 5. Upload to Azure
-        logger.info(f"  Uploading {len(segments)} segments to Azure...")
+        # Only upload segments that weren't skipped (valid_indices tracks which ones)
+        logger.info(f"  Uploading {len(segment_paths)} segments to Azure...")
         blob_paths = upload_segments_to_blob(
             segment_paths,
             blob_prefix,
@@ -558,8 +563,11 @@ def process_single_vhp_row(
         )
 
         # 6. Create output records
+        # CRITICAL: Only use segments at valid_indices to match blob_paths
+        # This ensures transcript-audio alignment when some segments are skipped
         output_rows = []
-        for i, (seg, blob_path) in enumerate(zip(segments, blob_paths)):
+        for seg_idx, blob_path in zip(valid_indices, blob_paths):
+            seg = segments[seg_idx]
             # Clean the segment text:
             # 1. Replace <space> with actual spaces
             cleaned_text = seg["text"].replace("<space>", " ")
@@ -585,7 +593,7 @@ def process_single_vhp_row(
             new_row = row.to_dict()
             new_row.update({
                 "source_row_idx": row_idx,
-                "segment_idx": i,
+                "segment_idx": seg_idx,
                 # NEW columns for segmented data (don't overwrite originals)
                 "segmented_audio_url": blob_path,
                 "segmented_audio_transcript": cleaned_text,
