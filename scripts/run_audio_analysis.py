@@ -148,7 +148,7 @@ def decode_audio_parallel(audio_data_list, target_sr=16000, max_workers=8):
 
 
 def batch_compute_spectrogram(waveforms, sr, n_fft=2048, hop_length=512):
-    """Compute spectrograms for batch of waveforms on GPU - properly batched."""
+    """Compute spectrograms for waveforms on GPU - one at a time to avoid OOM on long audio."""
     freqs = torch.linspace(0, sr/2, n_fft//2 + 1, device=device)
 
     spec_transform = torchaudio.transforms.Spectrogram(
@@ -162,26 +162,19 @@ def batch_compute_spectrogram(waveforms, sr, n_fft=2048, hop_length=512):
         normalized=False
     ).to(device)
 
-    # Find max length for padding
-    max_len = max(len(wv) for wv in waveforms)
-    max_len = max(max_len, n_fft)  # Ensure at least n_fft
-
-    # Pad all waveforms to same length and stack into batch
-    padded_waveforms = []
+    results = []
     for wv in waveforms:
-        if len(wv) < max_len:
-            wv = torch.nn.functional.pad(wv, (0, max_len - len(wv)), mode='constant', value=0)
-        padded_waveforms.append(wv)
+        # Move to GPU
+        wv_gpu = wv.to(device)
 
-    # Stack into batch tensor: (batch_size, samples)
-    batch_tensor = torch.stack(padded_waveforms).to(device)
+        # Ensure minimum length
+        if len(wv_gpu) < n_fft:
+            wv_gpu = torch.nn.functional.pad(wv_gpu, (0, n_fft - len(wv_gpu)), mode='constant', value=0)
 
-    # Compute spectrograms for entire batch at once
-    specs = spec_transform(batch_tensor)  # Shape: (batch, freq_bins, time_frames)
-    mags = torch.abs(specs)
-
-    # Return as list of (mag, freqs) tuples for compatibility
-    results = [(mags[i], freqs) for i in range(len(waveforms))]
+        # Compute spectrogram for single waveform
+        spec = spec_transform(wv_gpu)
+        mag = torch.abs(spec)
+        results.append((mag, freqs))
 
     return results
 
