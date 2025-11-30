@@ -177,6 +177,10 @@ CONFIG = {
     # Precision
     "fp16": True,                    # Use fp16 for V3
     "bf16": False,
+
+    # Token limit - Whisper's decoder has a hard limit of 448 tokens
+    # Samples with transcripts exceeding this will be skipped during preprocessing
+    "max_label_length": 448,
 }
 
 # Create output directory
@@ -572,27 +576,37 @@ model.print_trainable_parameters()
 # ## 6. Data Preprocessing
 
 # %%
-def prepare_dataset(batch):
-    """Preprocess audio and text for training."""
+def prepare_dataset(batch, max_label_length=448):
+    """
+    Preprocess audio and text for training.
+
+    Args:
+        batch: Single sample with 'audio' and 'sentence' keys
+        max_label_length: Maximum token length for labels (Whisper limit is 448)
+
+    Returns:
+        dict with 'input_features' and 'labels', or None if sample exceeds token limit
+    """
     audio = batch["audio"]
-    
+
     # Extract features from audio (returns float32 by default)
     input_features = processor(
         audio["array"],
         sampling_rate=audio["sampling_rate"],
         return_tensors="pt"
     ).input_features[0]
-    
-    # print(f"[DTYPE DEBUG] After processor: {input_features.dtype}")
 
     # Convert to float16 if using fp16 training
     if CONFIG["fp16"]:
         input_features = input_features.to(torch.float16)
-        # print(f"[DTYPE DEBUG] After fp16 conversion: {input_features.dtype}")
-    
+
     # Tokenize transcription
     labels = processor.tokenizer(batch["sentence"]).input_ids
-    
+
+    # Check if labels exceed Whisper's max decoder length (448 tokens)
+    if len(labels) > max_label_length:
+        return None  # Signal to skip this sample
+
     # Return ONLY the processed features (no audio, sentence, etc.)
     return {
         "input_features": input_features,
@@ -603,24 +617,35 @@ print("=" * 60)
 print("PREPROCESSING TRAINING DATA (converting audio to mel spectrograms)")
 print("=" * 60)
 print(f"Dataset size: {len(train_dataset)} samples")
+print(f"Max label length: {CONFIG['max_label_length']} tokens")
 
 # Keep reference to raw audio dataset for cleanup
 train_dataset_raw = train_dataset
 
 # Process manually to avoid multiprocessing crashes
 processed_train = {"input_features": [], "labels": []}
+skipped_token_limit = 0
+
 for i in range(len(train_dataset_raw)):
     if (i + 1) % 100 == 0:
         print(f"[PREPROCESS] Training progress: {i + 1}/{len(train_dataset_raw)}")
     sample = train_dataset_raw[i]
-    processed = prepare_dataset(sample)
+    processed = prepare_dataset(sample, CONFIG["max_label_length"])
+
+    if processed is None:
+        skipped_token_limit += 1
+        print(f"  [SKIP] Sample {i}: transcript exceeds {CONFIG['max_label_length']} tokens")
+        continue
+
     processed_train["input_features"].append(processed["input_features"])
     processed_train["labels"].append(processed["labels"])
 
 # Create dataset from dict (this ensures ONLY these columns exist)
 import datasets
 train_dataset = datasets.Dataset.from_dict(processed_train)
-print(f"Training preprocessing complete: {len(train_dataset)} samples")
+print(f"\nTraining preprocessing complete:")
+print(f"  Valid samples: {len(train_dataset)}")
+print(f"  Skipped (token limit): {skipped_token_limit}")
 
 # Free memory: delete raw audio dataset and processed dict
 del train_dataset_raw, processed_train
@@ -635,23 +660,37 @@ print("=" * 60)
 val_dataset_raw = val_dataset
 
 processed_val = {"input_features": [], "labels": []}
+skipped_val_token_limit = 0
+
 for i in range(len(val_dataset_raw)):
     if (i + 1) % 50 == 0:
         print(f"[PREPROCESS] Validation progress: {i + 1}/{len(val_dataset_raw)}")
     sample = val_dataset_raw[i]
-    processed = prepare_dataset(sample)
+    processed = prepare_dataset(sample, CONFIG["max_label_length"])
+
+    if processed is None:
+        skipped_val_token_limit += 1
+        print(f"  [SKIP] Sample {i}: transcript exceeds {CONFIG['max_label_length']} tokens")
+        continue
+
     processed_val["input_features"].append(processed["input_features"])
     processed_val["labels"].append(processed["labels"])
 
 val_dataset = datasets.Dataset.from_dict(processed_val)
-print(f"Validation preprocessing complete: {len(val_dataset)} samples")
+print(f"\nValidation preprocessing complete:")
+print(f"  Valid samples: {len(val_dataset)}")
+print(f"  Skipped (token limit): {skipped_val_token_limit}")
 
 # Free memory
 del val_dataset_raw, processed_val
 gc.collect()
 print("[MEMORY] Freed raw validation audio data")
 
-print(f"\nAll preprocessing complete!")
+print(f"\n{'='*60}")
+print(f"PREPROCESSING SUMMARY")
+print(f"{'='*60}")
+print(f"Train: {len(train_dataset)} samples (skipped {skipped_token_limit} for token limit)")
+print(f"Val: {len(val_dataset)} samples (skipped {skipped_val_token_limit} for token limit)")
 
 # %%
 # DEBUG: Check dataset columns after preprocessing
