@@ -80,8 +80,7 @@ def main():
         model_name=NEMO_MODEL,
         max_duration=MAX_DURATION,
         transcript_field=TRANSCRIPT_FIELD,
-        max_audio_duration=1800.0,
-        cleanup_temp=True
+        max_audio_duration=1800.0
     )
 
     if not output_rows:
