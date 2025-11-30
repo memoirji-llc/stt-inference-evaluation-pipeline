@@ -187,33 +187,6 @@ CONFIG = {
 os.makedirs(CONFIG["output_dir"], exist_ok=True)
 print(f"Output directory: {CONFIG['output_dir']}")
 
-# %%
-# OPTIONAL: Uncomment below for quick debugging with demo data
-# CONFIG = {
-#     "train_parquet": "../data/raw/loc/veterans_history_project_resources_pre2010_train_nfa_segmented_demo.parquet",
-#     "val_parquet": "../data/raw/loc/veterans_history_project_resources_pre2010_train_nfa_segmented_demo.parquet",
-#     "blob_prefix": "loc_vhp",
-#     "train_sample_size": None,
-#     "val_sample_size": None,
-#     "random_seed": 42,
-#     "output_dir": "../outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000",
-#     "model_name": "openai/whisper-large-v3",
-#     "lora_r": 32,
-#     "lora_alpha": 64,
-#     "lora_dropout": 0.05,
-#     "target_modules": ["q_proj", "v_proj"],
-#     "learning_rate": 1e-5,
-#     "batch_size": 4,
-#     "gradient_accumulation": 4,
-#     "warmup_steps": 2,
-#     "max_steps": 10,
-#     "eval_steps": 5,
-#     "save_steps": 5,
-#     "fp16": True,
-#     "bf16": False,
-# }
-
-
 # %% [markdown]
 # ## 3. Load Data
 # 
@@ -484,7 +457,9 @@ val_dataset = prepare_hf_dataset_batched(
     save_path=str(CACHE_DIR / "val_dataset"),
     batch_size=100
 )
-
+# Sample a few items from validation set for quick inference test
+df_val_sample = df_val.sample(n=min(10, len(df_val)), random_state=CONFIG["random_seed"])
+print(f"Validation samples for testing: {len(df_val_sample)}")
 # Free df_val memory
 del df_val
 gc.collect()
@@ -916,10 +891,7 @@ pipe = hf_pipeline(
     device=0 if torch.cuda.is_available() else -1,
 )
 
-# Sample a few items from validation set for quick inference test
-df_val_sample = df_val.sample(n=min(10, len(df_val)), random_state=CONFIG["random_seed"])
 
-print(f"Validation samples for testing: {len(df_val_sample)}")
 print(f"Model: {merged_path}")
 
 # %%
