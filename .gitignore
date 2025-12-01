@@ -4,6 +4,9 @@
 #azure cloud
 infra/azure/env.local.sh
 
+#runpod
+infra/runpod_dev
+
 # System package files (downloaded during setup)
 *.deb
 
@@ -24,6 +27,7 @@ data/*.*
 data/audio
 data/old_broadcast
 data/processed
+data/raw/loc
 data/testing
 data/veterans_history_project_sample_processed
 
