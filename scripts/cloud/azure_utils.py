@@ -4,9 +4,14 @@ Reuses authentication logic from loc_vhp_2_az_blob.py
 """
 import os
 import io
+import logging
 from typing import Optional, BinaryIO
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
+
+# Suppress Azure SDK verbose logging
+logging.getLogger("azure").setLevel(logging.WARNING)
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
 
 
 def make_blob_service() -> BlobServiceClient:
