@@ -1,18 +1,27 @@
+#!/usr/bin/env python3
 """
-Audio Preprocessing Functions for VHP Archival Speech
+Audio Preprocessing Script for VHP Archival Speech
 
-Based on audio quality analysis results, provides functions to:
-- Normalize loudness to target LUFS
-- Remove low-frequency rumble with high-pass filter
-- Reduce background noise
-- Boost high frequencies for bandwidth-limited audio (TODO)
+Orchestrates: Download (audio-raw) → Preprocess → Upload (audio-processed)
+
+Available preprocessing methods:
+- highpass_filter: Remove low-frequency rumble (<80 Hz)
+- loudness_normalization: Normalize to target LUFS
+- noise_reduction: Reduce background noise
+- eq_high_freq_boost: Boost high frequencies (TODO)
 
 Usage:
-    # In notebooks:
-    from scripts.preprocess_audio import preprocess_audio
+    # Single preprocessing method (recommended)
+    python scripts/preprocess_audio.py \\
+        --parquet data/raw/loc/veterans_history_project_resources_pre2010_test.parquet \\
+        --method highpass_filter \\
+        --source_container audio-raw \\
+        --source_prefix loc_vhp \\
+        --dest_container audio-processed \\
+        --sample_size 10
 
-    # In CLI (for batch processing):
-    python scripts/preprocess_audio.py --parquet data/test.parquet --variant full_pipeline
+Output structure:
+    audio-processed/{method_name}/loc_vhp/{audio_id}/audio_processed.wav
 """
 
 import io
@@ -218,15 +227,15 @@ def eq_high_freq_boost(waveform, sr, rolloff_hz=1000, boost_db=6.0):
     return waveform
 
 
-def preprocess_audio(audio_bytes, methods, audio_id=None, metrics=None):
+def preprocess_audio_single(audio_bytes, method, audio_id=None, metrics=None):
     """
-    Apply preprocessing pipeline to audio.
+    Apply single preprocessing method to audio.
 
     Args:
         audio_bytes: Original audio bytes (mp3, mp4, wav, etc.)
-        methods: List of method names to apply (in order)
-                 Options: 'loudness_normalization', 'highpass_filter',
-                         'noise_reduction', 'eq_high_freq_boost'
+        method: Preprocessing method name
+                Options: 'loudness_normalization', 'highpass_filter',
+                        'noise_reduction', 'eq_high_freq_boost'
         audio_id: Audio ID for logging (optional)
         metrics: Dict of metrics from audio analysis (for adaptive processing)
 
@@ -234,34 +243,32 @@ def preprocess_audio(audio_bytes, methods, audio_id=None, metrics=None):
         Preprocessed audio bytes (WAV format for lossless storage)
 
     Example:
-        >>> audio_bytes_preprocessed = preprocess_audio(
+        >>> audio_bytes_preprocessed = preprocess_audio_single(
         ...     audio_bytes_raw,
-        ...     methods=['highpass_filter', 'noise_reduction', 'loudness_normalization'],
-        ...     audio_id='1234',
-        ...     metrics={'spectral_rolloff_hz': 850}
+        ...     method='highpass_filter',
+        ...     audio_id='1234'
         ... )
     """
     # Load audio
     waveform, sr = load_audio_bytes(audio_bytes, target_sr=16000)
 
-    # Apply methods in order
-    for method in methods:
-        if method == 'loudness_normalization':
-            waveform = loudness_normalize(waveform, sr, target_lufs=-16.0)
+    # Apply the single method
+    if method == 'loudness_normalization':
+        waveform = loudness_normalize(waveform, sr, target_lufs=-16.0)
 
-        elif method == 'eq_high_freq_boost':
-            # Use rolloff from metrics if available
-            rolloff = metrics.get('spectral_rolloff_hz', 1000) if metrics else 1000
-            waveform = eq_high_freq_boost(waveform, sr, rolloff_hz=rolloff)
+    elif method == 'eq_high_freq_boost':
+        # Use rolloff from metrics if available
+        rolloff = metrics.get('spectral_rolloff_hz', 1000) if metrics else 1000
+        waveform = eq_high_freq_boost(waveform, sr, rolloff_hz=rolloff)
 
-        elif method == 'noise_reduction':
-            waveform = noise_reduce(waveform, sr, stationary=True)
+    elif method == 'noise_reduction':
+        waveform = noise_reduce(waveform, sr, stationary=True)
 
-        elif method == 'highpass_filter':
-            waveform = highpass_filter(waveform, sr, cutoff_hz=80)
+    elif method == 'highpass_filter':
+        waveform = highpass_filter(waveform, sr, cutoff_hz=80)
 
-        else:
-            print(f"[WARNING] Unknown preprocessing method: {method}")
+    else:
+        raise ValueError(f"Unknown preprocessing method: {method}")
 
     # Convert back to bytes (WAV for lossless storage)
     processed_bytes = save_audio_bytes(waveform, sr, format='wav')
@@ -269,112 +276,162 @@ def preprocess_audio(audio_bytes, methods, audio_id=None, metrics=None):
     return processed_bytes
 
 
-# Preprocessing variant presets
-PREPROCESSING_VARIANTS = {
-    'raw': [],  # No preprocessing (baseline)
-    'normalized': ['loudness_normalization'],
-    'normalized_eq': ['loudness_normalization', 'eq_high_freq_boost'],
-    'normalized_denoised': ['loudness_normalization', 'noise_reduction'],
-    'full_pipeline': ['highpass_filter', 'noise_reduction', 'eq_high_freq_boost', 'loudness_normalization']
-}
+# Available preprocessing methods
+AVAILABLE_METHODS = [
+    'highpass_filter',
+    'loudness_normalization',
+    'noise_reduction',
+    'eq_high_freq_boost'
+]
 
 
 def main():
     """
-    CLI for batch preprocessing.
+    CLI for batch preprocessing with Azure orchestration.
 
     Usage:
         python scripts/preprocess_audio.py \\
             --parquet data/raw/loc/veterans_history_project_resources_pre2010_test.parquet \\
-            --variant full_pipeline \\
-            --output_prefix loc_vhp_preprocessed/full_pipeline \\
-            --batch_size 100
+            --method highpass_filter \\
+            --source_container audio-raw \\
+            --source_prefix loc_vhp \\
+            --dest_container audio-processed \\
+            --sample_size 10
     """
     import argparse
     import pandas as pd
+    import sys
+    import logging
     from pathlib import Path
     from tqdm import tqdm
+    from dotenv import load_dotenv
+
+    # Load credentials
+    load_dotenv(dotenv_path='credentials/creds.env')
+
     from cloud.azure_utils import download_blob_to_memory, upload_blob_from_memory
 
-    parser = argparse.ArgumentParser(description='Batch audio preprocessing for VHP dataset')
-    parser.add_argument('--parquet', required=True, help='Path to parquet file with audio metadata')
-    parser.add_argument('--variant', required=True, choices=list(PREPROCESSING_VARIANTS.keys()),
-                       help='Preprocessing variant to apply')
-    parser.add_argument('--output_prefix', required=True,
-                       help='Azure blob prefix for output (e.g., loc_vhp_preprocessed/full_pipeline)')
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger = logging.getLogger(__name__)
+
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Batch audio preprocessing with Azure orchestration')
+    parser.add_argument('--parquet', required=True,
+                       help='Path to parquet file with audio metadata')
+    parser.add_argument('--method', required=True, choices=AVAILABLE_METHODS,
+                       help='Preprocessing method to apply (single method only)')
+    parser.add_argument('--source_container', default='audio-raw',
+                       help='Azure blob container for source audio (default: audio-raw)')
+    parser.add_argument('--source_prefix', default='loc_vhp',
+                       help='Blob prefix for source audio (default: loc_vhp)')
+    parser.add_argument('--dest_container', default='audio-processed',
+                       help='Azure blob container for output (default: audio-processed)')
     parser.add_argument('--batch_size', type=int, default=100,
-                       help='Number of files to process before checkpoint')
+                       help='Number of files to process before checkpoint (default: 100)')
     parser.add_argument('--sample_size', type=int, default=None,
                        help='Limit number of files to process (for testing)')
 
     args = parser.parse_args()
 
     # Load parquet
+    logger.info(f"Loading parquet: {args.parquet}")
     df = pd.read_parquet(args.parquet)
     if args.sample_size:
         df = df.head(args.sample_size)
+        logger.info(f"Limited to {args.sample_size} samples for testing")
 
-    print(f"Processing {len(df)} files with variant: {args.variant}")
-    print(f"Methods: {PREPROCESSING_VARIANTS[args.variant]}")
-    print(f"Output prefix: {args.output_prefix}")
-    print("=" * 70)
-
-    # Load analysis results if available for adaptive processing
-    analysis_path = Path('learnings/audio_quality_analysis/audio_quality_analysis.parquet')
-    if analysis_path.exists():
-        df_analysis = pd.read_parquet(analysis_path)
-        print(f"✓ Loaded audio quality analysis for {len(df_analysis)} files")
-    else:
-        df_analysis = None
-        print("⚠ No audio quality analysis found, proceeding without metrics")
+    logger.info("=" * 80)
+    logger.info("AUDIO PREPROCESSING - AZURE ORCHESTRATION")
+    logger.info("=" * 80)
+    logger.info(f"Files to process:    {len(df)}")
+    logger.info(f"Method:              {args.method}")
+    logger.info(f"Source container:    {args.source_container}")
+    logger.info(f"Source prefix:       {args.source_prefix}")
+    logger.info(f"Dest container:      {args.dest_container}")
+    logger.info(f"Output structure:    {args.dest_container}/{args.method}/{args.source_prefix}/{{audio_id}}/audio_processed.wav")
+    logger.info("=" * 80)
+    logger.info("")
 
     # Process files
-    methods = PREPROCESSING_VARIANTS[args.variant]
     processed_count = 0
     error_count = 0
+    skipped_count = 0
 
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing"):
         audio_id = row.get('azure_blob_index', idx)
 
         try:
-            # Download original
-            blob_path = f"loc_vhp/{audio_id}/audio.mp3"
+            # Step 1: Download from source container
+            source_path = f"{args.source_prefix}/{audio_id}/audio.mp3"
             try:
-                audio_bytes = download_blob_to_memory(blob_path)
-            except:
-                blob_path = f"loc_vhp/{audio_id}/video.mp4"
-                audio_bytes = download_blob_to_memory(blob_path)
+                logger.debug(f"Downloading: {args.source_container}/{source_path}")
+                audio_bytes = download_blob_to_memory(
+                    source_path,
+                    container_name=args.source_container
+                )
+            except Exception as e:
+                # Try video.mp4 if audio.mp3 fails
+                source_path = f"{args.source_prefix}/{audio_id}/video.mp4"
+                logger.debug(f"audio.mp3 not found, trying: {args.source_container}/{source_path}")
+                audio_bytes = download_blob_to_memory(
+                    source_path,
+                    container_name=args.source_container
+                )
 
-            # Get metrics for adaptive processing
-            metrics = None
-            if df_analysis is not None:
-                metrics_row = df_analysis[df_analysis['audio_id'] == str(audio_id)]
-                if len(metrics_row) > 0:
-                    metrics = metrics_row.iloc[0].to_dict()
+            # Step 2: Apply preprocessing
+            logger.debug(f"Preprocessing with method: {args.method}")
+            audio_bytes_processed = preprocess_audio_single(
+                audio_bytes,
+                method=args.method,
+                audio_id=audio_id
+            )
 
-            # Preprocess
-            if methods:  # Skip if raw variant
-                audio_bytes = preprocess_audio(audio_bytes, methods, audio_id, metrics)
-
-            # Upload
-            output_path = f"{args.output_prefix}/{audio_id}/audio.wav"
-            upload_blob_from_memory(audio_bytes, output_path)
+            # Step 3: Upload to destination container
+            dest_path = f"{args.method}/{args.source_prefix}/{audio_id}/audio_processed.wav"
+            logger.debug(f"Uploading: {args.dest_container}/{dest_path}")
+            upload_blob_from_memory(
+                audio_bytes_processed,
+                dest_path,
+                container_name=args.dest_container
+            )
 
             processed_count += 1
 
+        except FileNotFoundError as e:
+            logger.warning(f"[SKIP] Audio not found for {audio_id}: {e}")
+            skipped_count += 1
+
         except Exception as e:
-            print(f"\n[ERROR] Failed to process {audio_id}: {e}")
+            logger.error(f"[ERROR] Failed to process {audio_id}: {e}")
             error_count += 1
 
         # Checkpoint
-        if (processed_count + error_count) % args.batch_size == 0:
-            print(f"\nCheckpoint: {processed_count} processed, {error_count} errors")
+        if (processed_count + error_count + skipped_count) % args.batch_size == 0:
+            logger.info("")
+            logger.info(f"Checkpoint: {processed_count} processed, {error_count} errors, {skipped_count} skipped")
+            logger.info("")
 
-    print("\n" + "=" * 70)
-    print(f"✓ COMPLETE")
-    print(f"  Processed: {processed_count}")
-    print(f"  Errors: {error_count}")
+    # Final summary
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("✓ PREPROCESSING COMPLETE")
+    logger.info("=" * 80)
+    logger.info(f"Processed:  {processed_count}")
+    logger.info(f"Errors:     {error_count}")
+    logger.info(f"Skipped:    {skipped_count}")
+    logger.info(f"Total:      {len(df)}")
+    logger.info("")
+    logger.info(f"Output location: {args.dest_container}/{args.method}/{args.source_prefix}/")
+    logger.info("")
+
+    return 0 if error_count == 0 else 1
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    sys.exit(main())
