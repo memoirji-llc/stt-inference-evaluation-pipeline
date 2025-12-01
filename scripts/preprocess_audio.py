@@ -319,6 +319,10 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
+    # Suppress Azure SDK verbose logging
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+
     # Parse arguments
     parser = argparse.ArgumentParser(description='Batch audio preprocessing with Azure orchestration')
     parser.add_argument('--parquet', required=True,
