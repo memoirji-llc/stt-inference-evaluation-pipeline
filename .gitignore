@@ -4,6 +4,9 @@
 #azure cloud
 infra/azure/env.local.sh
 
+#runpod
+infra/runpod_dev
+
 # System package files (downloaded during setup)
 *.deb
 
