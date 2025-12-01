@@ -27,6 +27,7 @@ data/*.*
 data/audio
 data/old_broadcast
 data/processed
+data/raw/loc
 data/testing
 data/veterans_history_project_sample_processed
 
