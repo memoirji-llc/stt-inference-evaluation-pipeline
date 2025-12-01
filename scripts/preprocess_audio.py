@@ -309,7 +309,7 @@ def main():
     # Load credentials
     load_dotenv(dotenv_path='credentials/creds.env')
 
-    from cloud.azure_utils import download_blob_to_memory, upload_blob_from_memory
+    from cloud.azure_utils import download_blob_to_memory, upload_blob
 
     # Setup logging
     logging.basicConfig(
@@ -371,16 +371,16 @@ def main():
             try:
                 logger.debug(f"Downloading: {args.source_container}/{source_path}")
                 audio_bytes = download_blob_to_memory(
-                    source_path,
-                    container_name=args.source_container
+                    blob_path=source_path,
+                    container=args.source_container
                 )
             except Exception as e:
                 # Try video.mp4 if audio.mp3 fails
                 source_path = f"{args.source_prefix}/{audio_id}/video.mp4"
                 logger.debug(f"audio.mp3 not found, trying: {args.source_container}/{source_path}")
                 audio_bytes = download_blob_to_memory(
-                    source_path,
-                    container_name=args.source_container
+                    blob_path=source_path,
+                    container=args.source_container
                 )
 
             # Step 2: Apply preprocessing
@@ -394,10 +394,10 @@ def main():
             # Step 3: Upload to destination container
             dest_path = f"{args.method}/{args.source_prefix}/{audio_id}/audio_processed.wav"
             logger.debug(f"Uploading: {args.dest_container}/{dest_path}")
-            upload_blob_from_memory(
-                audio_bytes_processed,
-                dest_path,
-                container_name=args.dest_container
+            upload_blob(
+                blob_path=dest_path,
+                data=audio_bytes_processed,
+                container=args.dest_container
             )
 
             processed_count += 1
