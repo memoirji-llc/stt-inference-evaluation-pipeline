@@ -79,18 +79,6 @@ def run(cfg):
     log(f"Loading HuggingFace Whisper model from: {model_dir}")
     log(f"Device: {device_str}, Dtype: {torch_dtype}")
 
-    # Load model and processor
-    model = WhisperForConditionalGeneration.from_pretrained(
-        model_dir,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True
-    ).to(device_str)
-
-    processor = WhisperProcessor.from_pretrained(model_dir)
-
-    log(f"Model loaded successfully")
-    log(f"Model config n_mels: {model.config.num_mel_bins}")
-
     # Get transcription parameters from config
     condition_on_previous_text = cfg["model"].get("condition_on_previous_text", True)
     log(f"Context passing (condition_on_previous_text): {condition_on_previous_text}")
@@ -103,6 +91,35 @@ def run(cfg):
     suppress_tokens = cfg["model"].get("suppress_tokens", [-1])
 
     log(f"Generation params: beam_size={beam_size}, temperature={temperature}")
+
+    # Build generation config for pipeline
+    generate_kwargs = {
+        "num_beams": beam_size,
+        "return_timestamps": False,  # Don't need word-level timestamps for faster inference
+    }
+
+    # Temperature and sampling
+    if temperature > 0:
+        generate_kwargs["do_sample"] = True
+        generate_kwargs["temperature"] = temperature
+    else:
+        generate_kwargs["do_sample"] = False
+
+    # Create ASR pipeline with long-form audio support (automatic chunking)
+    # The pipeline handles chunking long audio into 30-second segments automatically
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model_dir,
+        torch_dtype=torch_dtype,
+        device=device_str,
+        model_kwargs={"low_cpu_mem_usage": True},
+        chunk_length_s=30,  # Process audio in 30-second chunks (Whisper's max input length)
+        stride_length_s=5,  # 5-second overlap between chunks for smooth transitions
+        return_timestamps=False,  # Return text only (no timestamps)
+    )
+
+    log(f"Pipeline loaded successfully (with automatic chunking for long-form audio)")
+    log(f"Model config n_mels: {pipe.model.config.num_mel_bins}")
 
     # Determine input source
     source_type = cfg["input"].get("source", "local")
@@ -253,55 +270,19 @@ def run(cfg):
                     gpu_mem_free = gpu_mem_total - gpu_mem_allocated
                     log(f"  GPU Memory: {gpu_mem_allocated:.2f}GB allocated, {gpu_mem_free:.2f}GB free (total: {gpu_mem_total:.2f}GB)")
 
-                # Transcribe
+                # Transcribe using pipeline (handles long-form audio automatically)
                 log(f"  Starting transcription...")
                 transcribe_start = time.time()
 
-                # Process audio with feature extractor (handles n_mels from model config)
-                inputs = processor(
+                # Use pipeline for automatic chunking of long-form audio
+                # Pipeline returns dict with 'text' key
+                result = pipe(
                     wave,
-                    sampling_rate=sample_rate,
-                    return_tensors="pt"
-                ).to(device_str, dtype=torch_dtype)
+                    generate_kwargs=generate_kwargs,
+                )
 
-                # Generate transcription
-                with torch.no_grad():
-                    # Build generation config
-                    gen_kwargs = {
-                        "num_beams": beam_size,
-                    }
-
-                    # Temperature and sampling config
-                    # When temp=0: use deterministic beam search (no sampling)
-                    # When temp>0: use sampling with that temperature
-                    if temperature > 0:
-                        gen_kwargs["do_sample"] = True
-                        gen_kwargs["temperature"] = temperature
-                    else:
-                        # Deterministic mode: no sampling, no temperature
-                        gen_kwargs["do_sample"] = False
-                        # Don't set temperature when do_sample=False
-
-                    if not condition_on_previous_text:
-                        # Disable prompt caching (each chunk is independent)
-                        gen_kwargs["use_cache"] = False
-
-                    if initial_prompt:
-                        # Encode prompt
-                        prompt_ids = processor.get_prompt_ids(initial_prompt)
-                        gen_kwargs["prompt_ids"] = prompt_ids
-
-                    # Generate
-                    generated_ids = model.generate(
-                        inputs["input_features"],
-                        **gen_kwargs
-                    )
-
-                    # Decode
-                    hyp_text = processor.batch_decode(
-                        generated_ids,
-                        skip_special_tokens=True
-                    )[0].strip()
+                # Extract text from pipeline result
+                hyp_text = result["text"].strip()
 
                 total_time = time.time() - start_time
                 transcribe_time = time.time() - transcribe_start
@@ -354,9 +335,8 @@ def run(cfg):
                 log(f"    - Preview: {hyp_text[:80]}...")
                 log(f"  ✓ SUCCESS")
 
-                # Clean up GPU tensors to prevent memory leak
+                # Clean up GPU memory to prevent memory leak
                 if device_str == "cuda":
-                    del inputs, generated_ids
                     torch.cuda.empty_cache()
 
             except Exception as e:
