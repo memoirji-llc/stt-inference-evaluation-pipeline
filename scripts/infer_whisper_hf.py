@@ -269,9 +269,18 @@ def run(cfg):
                     # Build generation config
                     gen_kwargs = {
                         "num_beams": beam_size,
-                        "temperature": temperature if temperature > 0 else 1.0,  # HF requires temp > 0
-                        "do_sample": temperature > 0,
                     }
+
+                    # Temperature and sampling config
+                    # When temp=0: use deterministic beam search (no sampling)
+                    # When temp>0: use sampling with that temperature
+                    if temperature > 0:
+                        gen_kwargs["do_sample"] = True
+                        gen_kwargs["temperature"] = temperature
+                    else:
+                        # Deterministic mode: no sampling, no temperature
+                        gen_kwargs["do_sample"] = False
+                        # Don't set temperature when do_sample=False
 
                     if not condition_on_previous_text:
                         # Disable prompt caching (each chunk is independent)
