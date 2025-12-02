@@ -1,0 +1,44 @@
+# Experiment: Pretrained Whisper Large-v3 Baseline on VHP Pre-2010 Test Set (Raw Audio)
+# Model: whisper-large-v3 (pretrained, no fine-tuning)
+# Audio: Raw audio from audio-raw container (no preprocessing)
+# Dataset: Test set (~1000 files), full duration
+# Purpose: Baseline for comparison with fine-tuned LoRA model
+
+experiment_id: vhp-pre2010-whisper-baseline-test-full-gpu
+
+model:
+  name: "whisper"
+  dir: "./models/faster-whisper/models--Systran--faster-whisper-large-v3"  # Pretrained baseline
+  batch_size: 16  # Decoder beam parallelism (NOT audio file batching)
+  device: "cuda"
+  compute_type: "float16"  # GPU inference
+
+  # Transcription parameters (explicit for reproducibility)
+  beam_size: 5  # Beam search width (1=greedy, 5=default balance)
+  temperature: 0.0  # Sampling temperature (0.0=deterministic)
+  vad_filter: true  # Voice activity detection to skip silence
+  no_speech_threshold: 0.6  # Threshold for detecting no speech
+  word_timestamps: false  # Don't generate word-level timestamps (faster)
+  initial_prompt: null  # No initial prompt
+  suppress_tokens: [-1]  # Default: suppress only special tokens
+  condition_on_previous_text: true  # Use context from previous segments (important for long-form!)
+
+input:
+  source: "azure_blob"
+  parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010_test.parquet"  # Test set only
+  blob_prefix: "loc_vhp"  # Raw audio from audio-raw container
+  sample_size: null  # Process ALL test files (~1000)
+  duration_sec: null  # Full audio duration (no trimming)
+  sample_rate: 16000
+
+output:
+  dir: "outputs/vhp-pre2010-whisper-baseline-test-full-gpu"
+  save_per_file: true  # Save individual hypothesis files
+
+evaluation:
+  use_whisper_normalizer: true  # Apply Whisper's text normalizer for WER calculation
+
+wandb:
+  project: amia-stt
+  group: vhp-pre2010-test-set
+  tags: ["whisper-large-v3", "pretrained", "baseline", "test-set", "full-duration", "gpu", "raw-audio", "workshop"]
