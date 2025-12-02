@@ -15,7 +15,8 @@ import pandas as pd
 from tqdm import tqdm
 from pydub import AudioSegment
 # models
-from faster_whisper import WhisperModel, BatchedInferencePipeline
+import torch
+from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
 # experiment tracking
 import wandb
 
@@ -30,12 +31,12 @@ from scripts.file_logger import log, init_logger
 
 def run(cfg):
     """
-    Run Whisper inference on dataset from config.
+    Run Whisper inference (HuggingFace transformers) on dataset from config.
 
     Supports:
+    - HuggingFace Whisper models (including fine-tuned models with custom n_mels)
     - Local files via glob pattern
     - Azure blob storage via parquet manifest
-    - Batch processing (faster-whisper BatchedInferencePipeline)
     - Flexible duration (full file or sliced)
     - Per-file outputs and metrics
     - File logging (timestamped logs saved to output directory)
@@ -47,77 +48,70 @@ def run(cfg):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize file logger FIRST (before any log() calls)
-    init_logger(out_dir, prefix="whisper")
+    init_logger(out_dir, prefix="whisper_hf")
 
     # Initialize wandb if enabled
     use_wandb = os.getenv("WANDB_MODE") != "disabled"
     if use_wandb:
-        wandb.init(project=cfg.get("experiment_id", "whisper-inference"), config=cfg)
+        wandb.init(project=cfg.get("experiment_id", "whisper-hf-inference"), config=cfg)
         log("Wandb logging enabled")
     else:
         log("Wandb logging disabled")
 
     # Load model
-    model_root = Path(cfg["model"]["dir"])
+    model_dir = cfg["model"]["dir"]
     model_name = cfg["model"]["name"]
 
-    # Handle both HuggingFace format (with snapshots/) and CTranslate2 format (flat structure)
-    snapshots_dir = model_root / "snapshots"
-    if snapshots_dir.exists():
-        # HuggingFace format: use latest snapshot
-        model_snap = max(snapshots_dir.iterdir(), key=lambda p: p.stat().st_mtime)
-        model_file_dir = str(model_snap)
-        log(f"Loading model: {model_name} from HuggingFace snapshot: {model_file_dir}")
+    # Get device and dtype from config
+    device_str = cfg["model"].get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    compute_type = cfg["model"].get("compute_type", "float16")
+
+    # Map compute_type to torch dtype
+    if compute_type == "float16":
+        torch_dtype = torch.float16
+    elif compute_type == "bfloat16":
+        torch_dtype = torch.bfloat16
+    elif compute_type == "int8":
+        torch_dtype = torch.float32  # Use float32 for CPU int8 inference
     else:
-        # CTranslate2 format: use model_root directly
-        model_file_dir = str(model_root)
-        log(f"Loading model: {model_name} from CTranslate2 directory: {model_file_dir}")
+        torch_dtype = torch.float32
 
-    # Get device and compute type from config
-    device = cfg["model"].get("device", "auto")
-    compute_type = cfg["model"].get("compute_type", "default")
+    log(f"Loading HuggingFace Whisper model from: {model_dir}")
+    log(f"Device: {device_str}, Dtype: {torch_dtype}")
 
-    log(f"Device: {device}, Compute type: {compute_type}")
-    
-    condition_on_previous_text = cfg["model"].get("condition_on_previous_text")
-    if not condition_on_previous_text:
-        condition_on_previous_text = True
-        log(f"condition_on_previous_text not specified, auto-set to True")
+    # Load model and processor
+    model = WhisperForConditionalGeneration.from_pretrained(
+        model_dir,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=True
+    ).to(device_str)
+
+    processor = WhisperProcessor.from_pretrained(model_dir)
+
+    log(f"Model loaded successfully")
+    log(f"Model config n_mels: {model.config.num_mel_bins}")
+
+    # Get transcription parameters from config
+    condition_on_previous_text = cfg["model"].get("condition_on_previous_text", True)
     log(f"Context passing (condition_on_previous_text): {condition_on_previous_text}")
-    
-    base_model = WhisperModel(model_file_dir, device=device, compute_type=compute_type)
 
-    # Use batched pipeline if batch_size specified
-    batch_size = int(cfg["model"].get("batch_size"))
-    if not batch_size:
-        batch_size = 1
-        log(f"batch_size not specified, auto-set to 1")
-    
-    if batch_size > 1:
-        model = BatchedInferencePipeline(model=base_model)
-        log(f"Using BatchedInferencePipeline with batch_size={batch_size}")
-    
-    else:
-        model = base_model
-        log("Batch size <= 1, using standard WhisperModel (no batching)")
+    # Generation parameters
+    beam_size = cfg["model"].get("beam_size", 5)
+    temperature = cfg["model"].get("temperature", 0.0)
+    no_speech_threshold = cfg["model"].get("no_speech_threshold", 0.6)
+    initial_prompt = cfg["model"].get("initial_prompt", None)
+    suppress_tokens = cfg["model"].get("suppress_tokens", [-1])
+
+    log(f"Generation params: beam_size={beam_size}, temperature={temperature}")
 
     # Determine input source
-    source_type = cfg["input"].get("source")
-    if not source_type:
-        source_type = "local"
-        log(f"source_type not specified, auto-set to local")    
+    source_type = cfg["input"].get("source", "local")
     log(f"source_type: {source_type}")
-    
+
     duration_sec = cfg["input"].get("duration_sec")
-    if not duration_sec:
-        duration_sec = None
-        log(f"duration_sec not specified, auto-set to None (full duration)") 
     log(f"duration_sec: {str(duration_sec)}")
-        
-    sample_rate = cfg["input"].get("sample_rate")
-    if not sample_rate:
-        sample_rate = 16000
-        log(f"sample_rate not specified, auto-set to 16000")
+
+    sample_rate = cfg["input"].get("sample_rate", 16000)
     log(f"sample_rate: {str(sample_rate)}")
 
     # Prepare file manifest
@@ -134,12 +128,12 @@ def run(cfg):
         # Local files via glob
         log(f"Preparing manifest from local (requires audio files location)")
         audio_glob = cfg["input"]["audio_glob"]
-        
+
         if not audio_glob:
             log(f"audio_glob not specified, cannot locate local files")
             log("Ending inference process- Reason: failed to identify input source")
             raise ValueError("audio_glob must be specified for local source_type")
-        
+
         file_paths = glob.glob(audio_glob)
         manifest = [
             {"file_id": i, "blob_path": p, "collection_number": Path(p).stem, "ground_truth": None, "title": ""}
@@ -149,7 +143,7 @@ def run(cfg):
 
     # Run inference on all files
     results = []
-    hyp_path = out_dir / "hyp_whisper.txt"
+    hyp_path = out_dir / "hyp_whisper_hf.txt"
 
     with open(hyp_path, "w") as hout:
         for item in tqdm(manifest, desc="Transcribing"):
@@ -199,14 +193,14 @@ def run(cfg):
 
                     # Use pydub to handle both MP3 and MP4 (video) files
                     import io
-                    log(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
+                    log(f"  Normalizing audio (MP3/MP4 → {sample_rate}Hz mono WAV)...")
 
                     # Load with pydub (handles MP3, MP4, M4A, WAV, etc.)
                     audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
 
                     # Normalize: convert to mono, resample to target rate
                     audio_segment = audio_segment.set_channels(1)  # Mono
-                    audio_segment = audio_segment.set_frame_rate(sample_rate)  # 16kHz
+                    audio_segment = audio_segment.set_frame_rate(sample_rate)  # Target sample rate
 
                     # Trim to desired duration if specified
                     if duration_sec is not None:
@@ -229,7 +223,7 @@ def run(cfg):
                     # For local files, just use the first path (should only be one)
                     source_path = source_paths[0]
                     log(f"  File: {source_path}")
-                    log(f"  Normalizing audio (MP3/MP4 → 16kHz mono WAV)...")
+                    log(f"  Normalizing audio (MP3/MP4 → {sample_rate}Hz mono WAV)...")
                     audio_segment = AudioSegment.from_file(source_path)
                     audio_segment = audio_segment.set_channels(1)
                     audio_segment = audio_segment.set_frame_rate(sample_rate)
@@ -252,7 +246,7 @@ def run(cfg):
                 log(f"  Audio loaded: {actual_duration:.1f}s ({actual_duration/60:.1f} min) in {load_time:.1f}s")
 
                 # Check GPU memory if using GPU
-                if device == "cuda" and torch.cuda.is_available():
+                if device_str == "cuda" and torch.cuda.is_available():
                     gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
                     gpu_mem_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
                     gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
@@ -263,83 +257,98 @@ def run(cfg):
                 log(f"  Starting transcription...")
                 transcribe_start = time.time()
 
-                with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-                    sf.write(tmp.name, wave, sample_rate)
+                # Process audio with feature extractor (handles n_mels from model config)
+                inputs = processor(
+                    wave,
+                    sampling_rate=sample_rate,
+                    return_tensors="pt"
+                ).to(device_str, dtype=torch_dtype)
 
-                    # Get context passing setting from config (default: True for fair comparison)
-                    condition_on_previous_text = cfg["model"].get("condition_on_previous_text")
-
-                    beam_size = cfg["model"].get("beam_size", 1)
-                    temperature = cfg["model"].get("temperature", 0.0)
-                    vad_filter = cfg["model"].get("vad_filter", True)
-                    no_speech_threshold = cfg["model"].get("no_speech_threshold", 0.6)
-                    word_timestamps = cfg["model"].get("word_timestamps", False)
-                    initial_prompt = cfg["model"].get("initial_prompt", None)
-                    suppress_tokens = cfg["model"].get("suppress_tokens", [-1])
-                    
-                    
-                    transcribe_args = {
-                        "beam_size": beam_size,
-                        "temperature": temperature,
-                        "vad_filter": vad_filter,
-                        "no_speech_threshold": no_speech_threshold,
-                        "word_timestamps": word_timestamps,
-                        "initial_prompt": initial_prompt,
-                        "suppress_tokens": suppress_tokens,
-                        "condition_on_previous_text": condition_on_previous_text,
+                # Generate transcription
+                with torch.no_grad():
+                    # Build generation config
+                    gen_kwargs = {
+                        "num_beams": beam_size,
+                        "temperature": temperature if temperature > 0 else 1.0,  # HF requires temp > 0
+                        "do_sample": temperature > 0,
                     }
-                    # specify batch_size
-                    if batch_size > 1:
-                        transcribe_args["batch_size"] = batch_size
 
-                    segments, info = model.transcribe(tmp.name, **transcribe_args)
+                    if not condition_on_previous_text:
+                        # Disable prompt caching (each chunk is independent)
+                        gen_kwargs["use_cache"] = False
 
-                    # Join segments
-                    hyp_text = " ".join(s.text.strip() for s in segments)
-                    total_time = time.time() - start_time
-                    transcribe_time = time.time() - transcribe_start
-                    speed_factor = actual_duration / total_time if total_time > 0 else 0
-                    log(f"  Transcription took {transcribe_time:.1f}s")
+                    if initial_prompt:
+                        # Encode prompt
+                        prompt_ids = processor.get_prompt_ids(initial_prompt)
+                        gen_kwargs["prompt_ids"] = prompt_ids
 
-                    # Write to output file (one line per file)
-                    hout.write(hyp_text + "\n")
+                    # Generate
+                    generated_ids = model.generate(
+                        inputs["input_features"],
+                        **gen_kwargs
+                    )
 
-                    # Save per-file result
-                    if cfg["output"].get("save_per_file", False):
-                        per_file_path = out_dir / f"hyp_{file_id}.txt"
-                        with open(per_file_path, "w") as f:
-                            f.write(hyp_text)
+                    # Decode
+                    hyp_text = processor.batch_decode(
+                        generated_ids,
+                        skip_special_tokens=True
+                    )[0].strip()
 
-                    # Log to wandb
-                    if use_wandb:
-                        wandb.log({
-                            "file_id": file_id,
-                            "collection_number": collection_num,
-                            "duration_sec": actual_duration,
-                            "processing_time_sec": total_time,
-                            "detected_language": info.language,
-                            "hypothesis_length": len(hyp_text),
-                        })
+                total_time = time.time() - start_time
+                transcribe_time = time.time() - transcribe_start
+                speed_factor = actual_duration / total_time if total_time > 0 else 0
+                log(f"  Transcription took {transcribe_time:.1f}s")
 
-                    results.append({
+                # Write to output file (one line per file)
+                hout.write(hyp_text + "\n")
+
+                # Save per-file result
+                if cfg["output"].get("save_per_file", False):
+                    per_file_path = out_dir / f"hyp_{file_id}.txt"
+                    with open(per_file_path, "w") as f:
+                        f.write(hyp_text)
+
+                # Log to wandb
+                if use_wandb:
+                    wandb.log({
                         "file_id": file_id,
                         "collection_number": collection_num,
-                        "blob_path": source_path,
-                        "hypothesis": hyp_text,
                         "duration_sec": actual_duration,
                         "processing_time_sec": total_time,
-                        "language": info.language,
-                        "status": "success",
+                        "hypothesis_length": len(hyp_text),
                     })
 
-                    # Improved logging
-                    log(f"  Transcription complete!")
-                    log(f"    - Audio duration: {actual_duration:.1f}s")
-                    log(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
-                    log(f"    - Speed: {speed_factor:.1f}x realtime")
-                    log(f"    - Language: {info.language}")
-                    log(f"    - Preview: {hyp_text[:80]}...")
-                    log(f"  ✓ SUCCESS")
+                results.append({
+                    "file_id": file_id,
+                    "collection_number": collection_num,
+                    "blob_path": source_path,
+                    "hypothesis": hyp_text,
+                    "duration_sec": actual_duration,
+                    "processing_time_sec": total_time,
+                    "language": "en",  # HF Whisper doesn't expose language detection easily
+                    "status": "success",
+                })
+
+                # Checkpoint: Save intermediate results every 100 files
+                CHECKPOINT_INTERVAL = 100
+                if len(results) % CHECKPOINT_INTERVAL == 0 and len(results) > 0:
+                    df_checkpoint = pd.DataFrame(results)
+                    checkpoint_path = out_dir / f"checkpoint_{len(results)}.parquet"
+                    df_checkpoint.to_parquet(checkpoint_path, index=False)
+                    log(f"  💾 Checkpoint saved: {checkpoint_path}")
+
+                # Improved logging
+                log(f"  Transcription complete!")
+                log(f"    - Audio duration: {actual_duration:.1f}s")
+                log(f"    - Processing time: {total_time:.1f}s (load: {load_time:.1f}s, transcribe: {transcribe_time:.1f}s)")
+                log(f"    - Speed: {speed_factor:.1f}x realtime")
+                log(f"    - Preview: {hyp_text[:80]}...")
+                log(f"  ✓ SUCCESS")
+
+                # Clean up GPU tensors to prevent memory leak
+                if device_str == "cuda":
+                    del inputs, generated_ids
+                    torch.cuda.empty_cache()
 
             except Exception as e:
                 import traceback
@@ -421,3 +430,16 @@ def run(cfg):
 
     log("Inference complete!")
     return {"hyp_path": str(hyp_path), "results_path": str(results_path)}
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run HuggingFace Whisper inference from YAML config")
+    parser.add_argument("--config", "-c", required=True, help="Path to YAML config file")
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    run(cfg)
