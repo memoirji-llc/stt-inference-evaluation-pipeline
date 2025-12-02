@@ -15,6 +15,7 @@ import pandas as pd
 from tqdm import tqdm
 from pydub import AudioSegment
 # models
+import torch
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 # experiment tracking
 import wandb
