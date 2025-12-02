@@ -3,7 +3,9 @@ from pathlib import Path
 
 def main():
     ap = argparse.ArgumentParser()
+    # primary argument parsed from config under configs/runs
     ap.add_argument("--config", required=True)
+    
     ap.add_argument("--model-dir", required=False, help="Override model directory from config")
     args = ap.parse_args()
 
@@ -14,12 +16,10 @@ def main():
     if args.model_dir:
         print(f"[OVERRIDE] Using model directory: {args.model_dir}")
         cfg["model"]["dir"] = args.model_dir
-        # Update experiment_id to reflect override
-        model_name = Path(args.model_dir).name.replace("models--Systran--faster-", "")
-        cfg["experiment_id"] = f"{cfg['experiment_id']}-override-{model_name}"
-
-    # Add "inference" tag to help distinguish from evaluation runs
+        cfg["model"]["name"]
+        
     tags = cfg["wandb"].get("tags", []).copy() if cfg["wandb"].get("tags") else []
+    #!custom logic: Force add "inference" tag to help distinguish from evaluation runs
     if "inference" not in tags:
         tags = ["inference"] + tags
 
@@ -32,7 +32,10 @@ def main():
 
     # Import the appropriate inference module
     scripts_dir = Path(__file__).parent
-    if "whisper" in cfg["model"]["name"]:
+    if "whisper-hf" in cfg["model"]["name"]:
+        sys.path.insert(0, str(scripts_dir))
+        import infer_whisper_hf as mod
+    elif "whisper" in cfg["model"]["name"]:
         sys.path.insert(0, str(scripts_dir))
         import infer_whisper as mod
     elif "wav2vec2" in cfg["model"]["name"]:
