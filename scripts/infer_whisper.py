@@ -288,6 +288,7 @@ def run(cfg):
                         "initial_prompt": initial_prompt,
                         "suppress_tokens": suppress_tokens,
                         "condition_on_previous_text": condition_on_previous_text,
+                        "language": "en",  # Force English for fair comparison with fine-tuned model
                     }
                     # specify batch_size
                     if batch_size > 1:

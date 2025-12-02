@@ -96,6 +96,8 @@ def run(cfg):
     generate_kwargs = {
         "num_beams": beam_size,
         "return_timestamps": False,  # Don't need word-level timestamps for faster inference
+        "language": "english",  # Force English (VHP interviews are in English)
+        "task": "transcribe",  # Transcribe (not translate)
     }
 
     # Temperature and sampling
