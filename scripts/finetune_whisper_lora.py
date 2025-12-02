@@ -32,7 +32,8 @@ OUTPUT:
     - runs/: Tensorboard logs
 
 NEXT STEPS:
-    After training, convert to CTranslate2 format and run production pipeline.
+    After training, use HuggingFace transformers for inference (NOT CTranslate2/faster-whisper).
+    Whisper v3 uses 128 mel bins - incompatible with faster-whisper for custom fine-tuned models.
     See "Model Outputs & Next Steps" section at end of script.
 """
 
@@ -155,8 +156,8 @@ CONFIG = {
     # Output directory - follows convention: {dataset}-{model}-{task}-{infra}
     "output_dir": str(PROJECT_ROOT / "outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000"),
     
-    # Model - using HuggingFace transformers (not faster-whisper, which is inference-only)
-    # Note: For inference we use faster-whisper, but for fine-tuning we need the original HF model
+    # Model - using HuggingFace transformers
+    # Note: Whisper v3 uses 128 mel bins - must use HuggingFace for inference (not faster-whisper)
     "model_name": "openai/whisper-large-v3",
     
     # LoRA configuration
@@ -483,7 +484,7 @@ print(f"  Transcript preview: {sample['sentence'][:200]}...")
 # %% [markdown]
 # ## 4. Initialize Model
 # 
-# **Note on model choice**: For fine-tuning we use `openai/whisper-large-v3` from HuggingFace transformers. This is different from inference where we use `faster-whisper` (CTranslate2 optimized). The fine-tuned weights can later be converted to faster-whisper format for inference.
+# **Note on model choice**: We use `openai/whisper-large-v3` from HuggingFace transformers. This model uses 128 mel bins (v3 architectural change from 80 in v1/v2). For inference, we MUST use HuggingFace transformers - custom fine-tuned v3 models are not compatible with faster-whisper/CTranslate2.
 
 # %%
 # Load processor
@@ -877,7 +878,7 @@ print(f"  Merged model: {merged_path}")
 #
 # **Note**: This uses a few samples from the validation set (not a real test set). For proper evaluation, use the production pipeline (see Next Steps).
 #
-# The merged model is in HuggingFace format. Our production `infer_whisper.py` uses faster-whisper (CTranslate2 format) for speed. For this quick test, we use HuggingFace transformers pipeline directly.
+# The merged model is in HuggingFace format. For production inference, use `infer_whisper_hf.py` (NOT `infer_whisper.py` which uses faster-whisper). For this quick test, we use HuggingFace transformers pipeline directly.
 
 # %%
 # Quick test using HuggingFace transformers pipeline
@@ -1050,73 +1051,70 @@ print(f"For proper evaluation, use the production pipeline (see next cell).")
 # ---
 # 
 # ### Production Inference Pipeline
-# 
-# **Step 1: Convert model to CTranslate2 format (run on RunPod or machine with model)**
+#
+# **IMPORTANT: Whisper v3 uses 128 mel bins - cannot use faster-whisper/CTranslate2 for custom fine-tuned models!**
+# **Must use HuggingFace transformers inference instead.**
+#
+# **Step 1: Copy model to production directory**
 # ```bash
-# # Install CTranslate2 converter
-# uv pip install ctranslate2
-# 
-# # Convert HuggingFace model to CTranslate2 format
-# ct2-transformers-converter \
-#   --model ../outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000/merged-model \
-#   --output_dir ../outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000/merged-model-ct2 \
-#   --quantization float16
-# 
-# # Copy to models directory for production use
-# cp -r ../outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000/merged-model-ct2 \
-#       ../models/whisper-large-v3-vhp-lora
+# # Copy merged HuggingFace model to models directory
+# cp -r outputs/vhp-pre2010-whisper-large-v3-lora-ft-a6000/merged-model \
+#       models/hf-whisper/whisper-large-v3-vhp-lora
 # ```
-# 
+#
 # **Step 2: Create inference config**
-# 
-# Create `configs/runs/vhp-pre2010-whisper-large-v3-lora-sample100.yaml`:
+#
+# Create `configs/runs/vhp-pre2010-whisper-lora-test-full-gpu.yaml`:
 # ```yaml
-# experiment_id: vhp-pre2010-whisper-large-v3-lora-sample100
-# 
+# experiment_id: vhp-pre2010-whisper-lora-test-full-gpu
+#
 # model:
-#   name: "whisper-large-v3-lora"
-#   dir: "./models/whisper-large-v3-vhp-lora"  # Use models/ directory (not outputs/)
-#   batch_size: 12
+#   name: "whisper-hf"  # Use HuggingFace inference (NOT faster-whisper)
+#   dir: "./models/hf-whisper/whisper-large-v3-vhp-lora"
+#   batch_size: 1  # HF doesn't batch like faster-whisper
 #   device: "cuda"
 #   compute_type: "float16"
-# 
+#
 # input:
 #   source: "azure_blob"
 #   parquet_path: "data/raw/loc/veterans_history_project_resources_pre2010_test.parquet"
 #   blob_prefix: "loc_vhp"
-#   sample_size: 100
-# 
+#   sample_size: null  # Process all test files
+#
 # output:
-#   dir: "outputs/vhp-pre2010-whisper-large-v3-lora-sample100"  # Inference results go to outputs/
+#   dir: "outputs/vhp-pre2010-whisper-lora-test-full-gpu"
 # ```
-# 
-# **Step 3: Run inference with production pipeline**
+#
+# **Step 3: Run inference with HuggingFace pipeline**
 # ```bash
-# uv run python scripts/infer_whisper.py \
-#   --config configs/runs/vhp-pre2010-whisper-large-v3-lora-sample100.yaml
+# # Use infer_whisper_hf.py (NOT infer_whisper.py)
+# uv run python scripts/run_inference.py \
+#   --config configs/runs/vhp-pre2010-whisper-lora-test-full-gpu.yaml
 # ```
-# 
+#
 # **Step 4: Evaluate**
 # ```bash
 # uv run python scripts/evaluate.py \
-#   --config configs/runs/vhp-pre2010-whisper-large-v3-lora-sample100.yaml \
-#   --inference_results outputs/vhp-pre2010-whisper-large-v3-lora-sample100/inference_results.parquet \
+#   --config configs/runs/vhp-pre2010-whisper-lora-test-full-gpu.yaml \
+#   --inference_results outputs/vhp-pre2010-whisper-lora-test-full-gpu/inference_results.parquet \
 #   --parquet data/raw/loc/veterans_history_project_resources_pre2010_test.parquet
 # ```
-# 
+#
 # ---
-# 
+#
 # ### Model Format Summary
-# 
+#
 # | Format | Location | Use Case | Size |
 # |--------|----------|----------|------|
 # | **LoRA adapters** | `outputs/{exp}/lora-weights/` | Load on base model, save space | ~60MB |
-# | **HF merged** | `outputs/{exp}/merged-model/` | Training, HF pipeline, conversion | ~3GB |
-# | **CTranslate2** | `models/whisper-large-v3-vhp-lora/` | **Production inference** | ~1.5GB |
+# | **HF merged** | `outputs/{exp}/merged-model/` | **Production inference** (Whisper v3) | ~3GB |
 # | **Checkpoints** | `outputs/{exp}/checkpoint-N/` | Resume training | ~3GB each |
-# 
+#
+# **Note on CTranslate2:** Custom fine-tuned Whisper v3 models cannot be used with faster-whisper/CTranslate2
+# due to the 128 mel bin architecture. Use HuggingFace transformers inference instead (infer_whisper_hf.py).
+# See docs/technical-deep-dive-whisper-architectures-and-conversion.md for details.
+#
 # **Disk cleanup**: After copying to `models/`, you can delete:
-# - `outputs/{exp}/merged-model/` (~3GB) - no longer needed after conversion
 # - `outputs/{exp}/checkpoint-*/` (~3GB each) - only needed if resuming training
 
 
