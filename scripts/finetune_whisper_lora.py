@@ -138,7 +138,7 @@ CONFIG = {
     "train_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_train_nfa_segmented.parquet"),
     "val_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_val_nfa_segmented.parquet"),
     "is_segmented": True,      # True if using NFA-segmented data (recommended)
-    "sample_size": None,       # None = use all data, or set to int for testing
+    "sample_size": 24,         # None = use all data, or set to int for testing (CHANGED: was None)
 
     # ====================
     # OUTPUT CONFIGURATION
@@ -265,10 +265,8 @@ def process_single_audio(row, idx, is_segmented):
     # Try to download audio
     for blob_path in blob_paths:
         try:
-            audio_bytes = azure_utils.download_blob_to_memory(
-                container_name="audio-raw",
-                blob_name=blob_path
-            )
+            # Use default container from AZURE_STORAGE_CONTAINER env var (same as notebook)
+            audio_bytes = azure_utils.download_blob_to_memory(blob_path)
 
             if not audio_bytes or len(audio_bytes) < 100:
                 continue
