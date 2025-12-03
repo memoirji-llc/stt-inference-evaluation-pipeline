@@ -107,7 +107,8 @@ CONFIG = {
     #   v2: "openai/whisper-medium" (80 mel bins)
     #   v2: "openai/whisper-small" (80 mel bins)
     #   v2: "openai/whisper-base" (80 mel bins)
-    "model_name": "openai/whisper-large-v3",
+    #   Local: Use absolute path for pre-downloaded models
+    "model_name": str(PROJECT_ROOT / "models/hf-whisper/whisper-base"),
 
     # ====================
     # LoRA CONFIGURATION
@@ -120,7 +121,7 @@ CONFIG = {
     # ====================
     # TRAINING HYPERPARAMETERS
     # ====================
-    "learning_rate": 1e-5,     # CRITICAL: v3 uses 1e-5, v2 uses 1e-3
+    "learning_rate": 1e-3,     # CRITICAL: v3 uses 1e-5, v2 uses 1e-3
     "batch_size": 4,           # Per-device batch size
     "gradient_accumulation_steps": 4,  # Effective batch = 4 * 4 = 16
     "max_steps": 5000,         # Total training steps
@@ -134,15 +135,15 @@ CONFIG = {
     # ====================
     # Parquet files with transcript + blob_path columns
     # Use NFA-segmented data (<=30s segments) for fine-tuning
-    "train_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_train.parquet"),
-    "val_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_val.parquet"),
+    "train_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_train_nfa_segmented.parquet"),
+    "val_parquet": str(PROJECT_ROOT / "data/raw/loc/veterans_history_project_resources_pre2010_val_nfa_segmented.parquet"),
     "is_segmented": True,      # True if using NFA-segmented data (recommended)
     "sample_size": None,       # None = use all data, or set to int for testing
 
     # ====================
     # OUTPUT CONFIGURATION
     # ====================
-    "output_dir": str(PROJECT_ROOT / "outputs/vhp-whisper-large-v3-lora-ft-a6000"),
+    "output_dir": str(PROJECT_ROOT / "outputs/vhp-whisper-base-v2-lora-ft-a6000"),
     "run_quick_test": True,    # Run inference test after training
     "test_sample_size": 10,    # Number of val samples to test
 }
@@ -180,20 +181,45 @@ print("=" * 80)
 print("STEP 1: LOAD DATA")
 print("=" * 80)
 
+def load_finetune_data(parquet_path, is_segmented, sample_size=None):
+    """Load and filter parquet data for fine-tuning."""
+    df = pd.read_parquet(parquet_path)
+
+    if is_segmented:
+        # Filter for valid segmented samples
+        print(f"Detected segmented parquet with {len(df)} segments")
+        df = df[df['segmented_audio_url'].notna() & (df['segmented_audio_url'] != '')]
+        print(f"Filtered to {len(df)} segments with segmented_audio_url")
+        df = df[df['segmented_audio_transcript'].notna() & (df['segmented_audio_transcript'] != '')]
+        print(f"Filtered to {len(df)} segments with segmented_audio_transcript")
+    else:
+        # Filter for original data
+        df = df[df['fulltext_file_str'].notna()]
+        df = df[(df['audio_url'].notna()) | (df['video_url'].notna())]
+        print(f"Filtered to {len(df)} items with transcripts and media")
+
+    if sample_size and sample_size < len(df):
+        df = df.sample(n=sample_size, random_state=42)
+        print(f"Sampled {sample_size} items")
+
+    return df
+
 # Load train/val parquet files
-train_df = data_loader.load_finetune_dataset(
+print("Loading training data...")
+train_df = load_finetune_data(
     CONFIG["train_parquet"],
-    is_segmented=CONFIG["is_segmented"],
-    sample_size=CONFIG["sample_size"]
+    CONFIG["is_segmented"],
+    CONFIG["sample_size"]
 )
 
-val_df = data_loader.load_finetune_dataset(
+print("\nLoading validation data...")
+val_df = load_finetune_data(
     CONFIG["val_parquet"],
-    is_segmented=CONFIG["is_segmented"],
-    sample_size=CONFIG["sample_size"] // 10 if CONFIG["sample_size"] else None
+    CONFIG["is_segmented"],
+    CONFIG["sample_size"] // 10 if CONFIG["sample_size"] else None
 )
 
-print(f"Train samples: {len(train_df)}")
+print(f"\nTrain samples: {len(train_df)}")
 print(f"Val samples: {len(val_df)}")
 print()
 
@@ -216,7 +242,7 @@ def process_single_audio(row, idx, is_segmented):
     """
     # Get transcript
     if is_segmented:
-        transcript = row.get("segment_text", "").strip()
+        transcript = row.get("segmented_audio_transcript", "").strip()
         if not transcript:
             return None
     else:
@@ -226,7 +252,7 @@ def process_single_audio(row, idx, is_segmented):
 
     # Get blob paths to try
     if is_segmented:
-        blob_path = row.get("blob_path")
+        blob_path = row.get("segmented_audio_url")
         if not blob_path:
             return None
         blob_paths = [blob_path]
