@@ -144,8 +144,7 @@ CONFIG = {
     # OUTPUT CONFIGURATION
     # ====================
     "output_dir": str(PROJECT_ROOT / "outputs/vhp-whisper-base-v2-lora-ft-a6000"),
-    "run_quick_test": True,    # Run inference test after training
-    "test_sample_size": 10,    # Number of val samples to test
+    "run_quick_test": False,   # Disabled - audio column not preserved after preprocessing
 }
 
 # Create output directory
@@ -418,56 +417,91 @@ print("=" * 80)
 print("STEP 4: PREPROCESS DATA")
 print("=" * 80)
 
-def preprocess_function(batch):
-    """Convert audio to mel spectrogram and tokenize transcript."""
-    # Process audio
-    audio_arrays = [audio["array"] for audio in batch["audio"]]
+def prepare_dataset(sample, processor, max_label_length=448):
+    """
+    Preprocess single audio sample.
 
-    # Extract mel spectrograms (processor handles n_mels automatically from model config)
-    inputs = processor.feature_extractor(
-        audio_arrays,
-        sampling_rate=16000,
+    Returns dict with input_features and labels, or None if exceeds token limit.
+    """
+    audio = sample["audio"]
+
+    # Extract features from audio
+    input_features = processor.feature_extractor(
+        audio["array"],
+        sampling_rate=audio["sampling_rate"],
         return_tensors="pt"
-    )
+    ).input_features[0]
 
-    # Tokenize transcripts
-    labels = processor.tokenizer(
-        batch["transcript"],
-        return_tensors="pt",
-        padding=True
-    ).input_ids
+    # Convert to fp16 if using fp16 training
+    if CONFIG["fp16"]:
+        input_features = input_features.to(torch.float16)
+
+    # Tokenize transcript
+    labels = processor.tokenizer(sample["transcript"]).input_ids
+
+    # Check if labels exceed Whisper's max decoder length
+    if len(labels) > max_label_length:
+        return None  # Skip this sample
 
     return {
-        "input_features": inputs.input_features,
+        "input_features": input_features,
         "labels": labels
     }
 
 
-# Preprocess datasets
+# Preprocess datasets manually (like notebook - avoids multiprocessing issues)
 print("Preprocessing train dataset...")
-train_dataset = train_dataset.map(
-    preprocess_function,
-    batched=True,
-    batch_size=8,
-    remove_columns=train_dataset.column_names
-)
+print(f"Dataset size: {len(train_dataset)} samples")
+print(f"Max label length: {CONFIG.get('max_label_length', 448)} tokens")
 
-print("Preprocessing val dataset...")
-val_dataset = val_dataset.map(
-    preprocess_function,
-    batched=True,
-    batch_size=8,
-    remove_columns=val_dataset.column_names
-)
+processed_train = {"input_features": [], "labels": []}
+skipped_train = 0
 
-# Filter samples exceeding max token length (448 tokens)
-def filter_max_length(batch):
-    return [len(labels) <= 448 for labels in batch["labels"]]
+for i in range(len(train_dataset)):
+    sample = train_dataset[i]
+    processed = prepare_dataset(sample, processor, CONFIG.get("max_label_length", 448))
 
-train_dataset = train_dataset.filter(filter_max_length, batched=True, batch_size=100)
-val_dataset = val_dataset.filter(filter_max_length, batched=True, batch_size=100)
+    if processed is None:
+        skipped_train += 1
+        continue
 
-print(f"After filtering: {len(train_dataset)} train, {len(val_dataset)} val samples")
+    processed_train["input_features"].append(processed["input_features"])
+    processed_train["labels"].append(processed["labels"])
+
+# Create new dataset from preprocessed data
+import datasets
+train_dataset = datasets.Dataset.from_dict(processed_train)
+
+print(f"Training preprocessing complete:")
+print(f"  Valid samples: {len(train_dataset)}")
+print(f"  Skipped (token limit): {skipped_train}")
+
+print("\nPreprocessing val dataset...")
+processed_val = {"input_features": [], "labels": []}
+skipped_val = 0
+
+for i in range(len(val_dataset)):
+    sample = val_dataset[i]
+    processed = prepare_dataset(sample, processor, CONFIG.get("max_label_length", 448))
+
+    if processed is None:
+        skipped_val += 1
+        continue
+
+    processed_val["input_features"].append(processed["input_features"])
+    processed_val["labels"].append(processed["labels"])
+
+val_dataset = datasets.Dataset.from_dict(processed_val)
+
+print(f"Validation preprocessing complete:")
+print(f"  Valid samples: {len(val_dataset)}")
+print(f"  Skipped (token limit): {skipped_val}")
+
+print(f"\n{'='*60}")
+print(f"PREPROCESSING SUMMARY")
+print(f"{'='*60}")
+print(f"Train: {len(train_dataset)} samples (skipped {skipped_train})")
+print(f"Val: {len(val_dataset)} samples (skipped {skipped_val})")
 print()
 
 
@@ -551,6 +585,8 @@ training_args = Seq2SeqTrainingArguments(
     metric_for_best_model="wer",
     greater_is_better=False,
     push_to_hub=False,
+    remove_unused_columns=False,  # Required for PEFT
+    label_names=["labels"],
 )
 
 print(f"Training configuration:")
