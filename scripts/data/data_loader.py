@@ -95,13 +95,19 @@ def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") ->
     # 3. idx (fallback - current row index)
     blob_idx = row.get('azure_blob_index', row.get('original_parquet_index', idx))
 
+    # Custom logic for preprocessed audio (e.g., high-pass filtered)
+    if "processed" in blob_prefix:
+        candidates.append(f"{blob_prefix}/{blob_idx}/audio_processed.wav")
+        return candidates
+
     has_video = pd.notnull(row.get('video_url')) and str(row['video_url']).strip()
     has_audio = pd.notnull(row.get('audio_url')) and str(row['audio_url']).strip()
 
     # If row has any media URL, try both video and audio paths
-    if has_video or has_audio:
+    if has_video:
         # Try video first (upload script prefers video)
         candidates.append(f"{blob_prefix}/{blob_idx}/video.mp4")
+    if has_audio:
         # Then try audio as fallback
         candidates.append(f"{blob_prefix}/{blob_idx}/audio.mp3")
 
