@@ -71,7 +71,7 @@ def load_vhp_dataset(
     return df
 
 
-def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "vhp") -> List[str]:
+def get_blob_path_for_row(row: pd.Series, idx: int, blob_prefix: str = "loc_vhp") -> List[str]:
     """
     Construct possible Azure blob paths for a given row.
     Returns a list of candidate paths to try, in order of preference.
