@@ -19,8 +19,8 @@ Benchmarking commercial and open-source speech-to-text models on bandwidth-limit
 
 ```bash
 # Clone the repository
-git clone https://github.com/memoirji-llc/stt-inference-evaluation-pipeline.git
-cd amia2025-stt-benchmarking
+git clone https://github.com/your-username/amia2025-stt-benchmarking.git
+cd stt-inference-evaluation-pipeline
 
 # Install dependencies with uv
 uv sync
