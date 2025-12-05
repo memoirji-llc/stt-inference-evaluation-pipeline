@@ -19,7 +19,7 @@ Benchmarking commercial and open-source speech-to-text models on bandwidth-limit
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/amia2025-stt-benchmarking.git
+git clone https://github.com/memoirji-llc/stt-inference-evaluation-pipeline.git
 cd amia2025-stt-benchmarking
 
 # Install dependencies with uv
@@ -147,8 +147,6 @@ Word Error Rate (WER) is calculated as:
 ```
 WER = (Substitutions + Deletions + Insertions) / Total_Reference_Words
 ```
-
-See [learnings/wer-normalization-guide.md](learnings/wer-normalization-guide.md) for detailed explanation.
 
 ---
 
