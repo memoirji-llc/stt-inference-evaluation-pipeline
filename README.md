@@ -1,7 +1,6 @@
-# amia2025-stt-benchmarking
+# AMIA 2025 STT Benchmarking
 
-## Introduction
-Benchmarking commercial and open-source speech-to-text models on degraded archival audio from the Library of Congress Veterans History Project (pre-2010 oral histories with analog-era degradation).
+Benchmarking commercial and open-source speech-to-text models on bandwidth-limited archival audio from the Library of Congress Veterans History Project (pre-2010 oral histories with analog-era equipment limitations).
 
 **AMIA 2025 Presentation:** "Transcribing a Broken Record: Benchmarking STT for Archival Oral Histories"
 - Session 12205 | Dec 5, 2024, 3:45-4:15pm | Baltimore Marriott Waterfront
@@ -9,218 +8,110 @@ Benchmarking commercial and open-source speech-to-text models on degraded archiv
 
 ---
 
-## Quick Status
+## Getting Started
 
-### ✅ Completed
-- 500-sample benchmarks: Google Chirp 2/3, AWS Transcribe (full-duration audio)
-- Production-grade pipeline: Rate limiting, concurrent job management, memory optimization
-- Tutorial notebooks: Whisper, Wav2Vec2, Canary-Qwen (1-sample quickstart)
+### Prerequisites
 
-### ⏳ In Progress
-- Open-source baselines: Whisper, Wav2Vec2 (pending)
-- Canary-Qwen: **BLOCKED** by Azure VM RAM constraints (needs 110GB, have 28GB)
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) - Fast Python package manager
 
-### 📋 Key Documents
-- [ABSTRACTS.md](ABSTRACTS.md) - AMIA abstract, goals, timeline, lessons learned
-- [CURRENT_STATUS.md](CURRENT_STATUS.md) - Detailed project status
-- [docs/](docs/) - Reference guides (CONFIG_GUIDE, QUICK_START, etc.)
-- [communications/](communications/) - AMIA emails, speaker bio, UMSI invitations
+### Installation
 
----
-
-## 📁 Project Structure
-
-data/           # Raw + processed audio data (not tracked in Git)
-
-models/         # Fine-tuned or checkpointed models (e.g., Whisper FT)
-
-scripts/        # Scripts for running inference, training, evaluation
-
-results/        # Transcripts, metrics, WER breakdowns
-
-configs/        # YAML or JSON config files for model and data
-
-tests/          # Pytest-based unit tests for reproducibility
-
-logs/           # System + training logs (auto-generated)
-
-notebooks/      # Jupyter playgrounds (for exploration only)
-
-docs/           # MkDocs or other docs
-
-## Current VMs (Azure)
-| Alias | Azure Name | Purpose | Specs | State |
-|--------|-------------|----------|--------|--------|
-| `vm-amia-preproc` | `vm-amia-t4-cpu` | CPU preprocessing | D4s_v5 | Deallocated |
-| `vm-amia-gpu` | `vm-amia-t4` | GPU inference/fine-tuning | NC4as_T4_v3 | On demand |
-
-## Connect to VMs via Remote-SSH
-VS Code: *Remote-SSH → Connect to Host → amia-gpu*; open
-```
-/home/arthur/projects/amia2025-stt-benchmarking
-```
-Terminal:
-```
-ssh arthur@172.191.111.144
-```
-GPU VM: 
-```
-ssh amia-gpu
-```
-CPU VM ("backup" VM): 
-```
-ssh amia-preproc
-```
-(*ssh alias in `~/.ssh/config`)
-<!-- - Streamlit/Gradio: open http://localhost:8501 (tunneled via `LocalForward 8501 127.0.0.1:8501`) -->
-
-## Azure CLI - VM
-check current VM status:
-`az vm list -d -o table`
-deallocate VM when done:
-`az vm deallocate -g rg-amia-ml -n vm-amia-t4`
-list all vms: 
-`az vm list-sizes --location eastus -o table`
-confirm rg status:
-`az group show -n rg-amia-ml -o table`
-
-## Azure CLI - Storage Access
-On VM:
-
-`az login --identity --allow-no-subscriptions`
-`export STG=stgamiadata26828`
-`az storage blob list --account-name "$STG" --container-name audio-raw --auth-mode login -o table`
-
-Grant VM access from Local:
-
-1.Vars
-```
-SUB=$(az account show --query id -o tsv)
-```
-```
-SCOPE="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$STG"
-```
-```
-PRINCIPAL_ID=$(az vm show -g "$RG" -n "vm-amia-t4" --query "identity.principalId" -o tsv)
-```
-2.Allow the VM’s identity to read/write blobs
-```az role assignment create \
-  --assignee-object-id "$PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Contributor" \
-  --scope "$SCOPE"
-```
-3.(optional) If you also want the identity to “see” the subscription in az account show:
-```
-az role assignment create \
-  --assignee-object-id "$PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Reader" \
-  --scope "/subscriptions/$SUB"
-```
-
-## Points to note:
-- “RBAC = identity-based, needs a role.
-Connection string = key-based, works anywhere.”
-- CUDA (Compute Unified Device Architecture) is NVIDIA’s programming interface that lets your Python libraries (like PyTorch or Whisper) talk directly to the GPU.
-
-
-## Environment setup with `uv`:
-To activate virtual environment in terminal:
-`source .venv/bin/activate`
-Make sure notebook can be run:
-`uv add --dev ipykernel`
-
-**Important: NeMo Forced Aligner requires additional setup**
-For audio segmentation (creating training data from long-form interviews), you need both:
-1. NeMo package (installed via `uv sync`)
-2. NeMo repository clone (for the forced aligner CLI tool):
 ```bash
-git clone https://github.com/NVIDIA/NeMo
-```
-The path will be auto-detected if cloned to project root, home directory, or `/workspace/NeMo`. Otherwise set `NEMO_REPO_PATH` environment variable.
+# Clone the repository
+git clone https://github.com/your-username/amia2025-stt-benchmarking.git
+cd amia2025-stt-benchmarking
 
-Testing PyTorch + MPS + torchaudio:
-1.
-```
-uv pip install "torchvision==0.24.*"
-```
-2. 
-```
-uv run python - <<'PY'
-import torch, torchaudio
-print("torch:", torch.__version__, "| mps:", torch.backends.mps.is_available())
-waveform = torch.randn(1, 16000)  # 1s fake audio
-resamp = torchaudio.transforms.Resample(16000, 8000)
-print("resampled shape:", resamp(waveform).shape)
-PY
+# Install dependencies with uv
+uv sync
+
+# Activate the virtual environment
+source .venv/bin/activate
 ```
 
-Run jupyter lab:
-`uv run --with jupyter jupyter lab`
+### Optional: Install dependency groups
 
-Download model
-`uv run hf download facebook/wav2vec2-base-960h --local-dir ./models/local/facebook--wav2vec2-base-960h`
+```bash
+# For development (testing, linting)
+uv sync --group dev
+
+# For training (GPU acceleration)
+uv sync --group train
+
+# For data processing
+uv sync --group data
+```
+
+### Running Jupyter notebooks
+
+```bash
+uv run --with jupyter jupyter lab
+```
 
 ---
 
-## Pipeline Execution
+## Project Structure
 
-### Important: GCP Chirp Memory Optimization
-
-**Issue:** When running GCP Chirp on large datasets (100+ files), the VM may crash silently during preprocessing due to out-of-memory (OOM) errors.
-
-**Solution:** Use the `max_concurrent_preprocessing` parameter to limit how many files are preprocessed simultaneously, regardless of batch size.
-
-**Recommended settings for T4 VM (16 GB RAM):**
-```yaml
-model:
-  gcp:
-    max_concurrent_preprocessing: 10  # Only preprocess 10 files at a time
-    upload_workers: 30                # Upload can be higher (network-bound)
-    transcribe_workers: 20
-    batch_size: 50                    # Process 50 files before checkpoint
+```
+amia2025-stt-benchmarking/
+├── configs/           # YAML config files for experiments
+│   └── runs/          # Experiment-specific configurations
+│
+├── data/              # Audio data and parquet metadata (not tracked in Git)
+│   ├── raw/           # Original audio files
+│   └── processed/     # Preprocessed audio segments
+│
+├── docs/              # Reference documentation
+│
+├── learnings/         # Research notes and analysis findings
+│
+├── models/            # Fine-tuned or downloaded model checkpoints
+│   └── faster-whisper/  # CTranslate2 format models
+│
+├── notebooks/         # Jupyter notebooks for exploration
+│   ├── 1_get_resources.ipynb      # Data collection
+│   ├── 2_filter_records.ipynb     # Dataset filtering
+│   ├── 3_add_audio_features.ipynb # Audio analysis
+│   ├── 4_create_splits.ipynb      # Train/val/test splits
+│   ├── 5_aggregate_results.ipynb  # Results aggregation
+│   └── tutorial_*.ipynb           # Tutorial notebooks
+│
+├── outputs/           # Inference results, metrics, transcripts
+│
+├── scripts/           # Python scripts for pipeline execution
+│   ├── data/          # Data loading and preprocessing
+│   ├── eval/          # Evaluation and WER calculation
+│   └── run_*.py       # Main pipeline scripts
+│
+├── tests/             # Pytest unit tests
+│
+└── wandb/             # Weights & Biases experiment logs
 ```
 
-See [docs/GCP_MEMORY_OPTIMIZATION.md](docs/GCP_MEMORY_OPTIMIZATION.md) for detailed explanation and troubleshooting.
+---
 
-### Important: Azure Blob Index Mapping
+## Models Evaluated
 
-**Context:** Audio files are stored in Azure Blob Storage with paths like `loc_vhp/{index}/video.mp4`, where the index comes from the **full** `veterans_history_project_resources.parquet` file.
+### Commercial APIs
+- **Google Chirp 2 & 3**: Google Cloud Speech-to-Text
+- **AWS Transcribe**: Amazon's STT service
 
-**Issue:** When you filter or slice the parquet (e.g., pre-2010, post-2010), the row indices change, breaking the blob path lookups.
+### Open-Source Models
+- **Whisper Large-v3**: OpenAI's multilingual STT model (1.55B parameters)
+- **Whisper Base**: Smaller variant for baseline comparison (74M parameters)
+- **Parakeet-TDT 1.1B**: NVIDIA NeMo model optimized for conversational audio
 
-**Solution:** The pipeline uses the `azure_blob_index` column to map filtered parquet rows back to their original blob paths. This column is:
-- **Automatically added** when you use [notebooks/vhp_data_slicing.ipynb](notebooks/vhp_data_slicing.ipynb) to create filtered datasets
-- **Handled automatically** by [scripts/data_loader.py](scripts/data_loader.py) with this priority:
-  1. `azure_blob_index` (for filtered datasets like pre-2010, post-2010)
-  2. `original_parquet_index` (for sampled datasets)
-  3. `idx` (for full parquet without filtering/sampling)
+---
 
-**When creating new filtered parquet files**, always preserve the original index as `azure_blob_index`:
-```python
-# After filtering
-df_filtered['azure_blob_index'] = df_filtered.index
-df_filtered.to_parquet('path/to/output.parquet', index=False)
-```
+## Running Experiments
 
 ### Inference Only
-
-Run inference without evaluation (useful for testing or when ground truth is unavailable):
 
 ```bash
 uv run python scripts/run_inference.py --config configs/runs/your-experiment.yaml
 ```
 
-**Outputs:**
-- `inference_results.parquet` - Per-file transcription results
-- `hyp_{model_name}.txt` - Combined hypothesis text file
-- `hyp_{file_id}.txt` - Individual hypothesis files (if `save_per_file: true`)
-- `{model}_log_*.txt` - Detailed inference log
-
 ### Full Pipeline (Inference + Evaluation)
-
-Run both inference and evaluation in one command:
 
 ```bash
 uv run python scripts/run_pipeline.py \
@@ -228,81 +119,67 @@ uv run python scripts/run_pipeline.py \
     --parquet data/veterans_history_project_resources.parquet
 ```
 
-The pipeline will:
-1. Run inference (generate transcripts)
-2. Automatically evaluate against ground truth
-3. Save results to `outputs/your-experiment/`
-
 ### Standalone Evaluation
 
-If you already have inference results and want to re-evaluate with different normalization:
-
 ```bash
-uv run python scripts/evaluate.py \
+uv run python scripts/eval/evaluate.py \
     --config configs/runs/your-experiment.yaml \
     --inference_results outputs/your-experiment/inference_results.parquet \
     --parquet data/veterans_history_project_resources.parquet
 ```
 
-**Outputs:**
-- `evaluation_results.parquet` - Per-file WER metrics
-- `evaluation_results.csv` - Same as above, CSV format for inspection
-- Console output showing mean/median WER and error breakdown
+---
 
-### Text Normalization Options
+## Key Findings
 
-Normalization is controlled via the config YAML file under the `evaluation` section.
+### Audio Characteristics
 
-**Option 1: Default (jiwer with contraction expansion)** - Recommended
-```yaml
-# No evaluation section needed - this is the default
-# OR explicitly:
-evaluation:
-  use_whisper_normalizer: false
-```
+The VHP pre-2010 collection exhibits **bandwidth-limited but clean** audio:
+- **SNR: 33 dB** - Excellent signal-to-noise ratio (clean recording)
+- **Spectral Roll-off: 562 Hz** - Severe bandwidth limitation (analog equipment)
+- **ZCR: 0.014** - Low zero-crossing rate (not noisy)
 
-Applies:
-- Contraction expansion (we're → we are, can't → can not)
-- Lowercase conversion
-- Punctuation removal
-- Whitespace normalization
+This is a distinct challenge from noisy audio: the recordings are clean within a limited frequency range due to analog-era equipment, not corrupted by noise.
 
-**Option 2: Whisper normalizer** - For comprehensive normalization
-```yaml
-evaluation:
-  use_whisper_normalizer: true
-```
+### WER Metrics
 
-Additionally handles:
-- Number normalization (10 → ten, 1st → first)
-- Date/currency formatting
-- Abbreviation expansion (Dr. → doctor)
-
-**Note:** Requires `openai-whisper` package. Install with:
-```bash
-uv pip install openai-whisper
-```
-
-### Understanding WER Metrics
-
-**WER Formula:**
+Word Error Rate (WER) is calculated as:
 ```
 WER = (Substitutions + Deletions + Insertions) / Total_Reference_Words
 ```
 
-- **Substitutions (S)**: Wrong word predicted
-- **Deletions (D)**: Reference word missing from hypothesis
-- **Insertions (I)**: Extra word added by model
+See [learnings/wer-normalization-guide.md](learnings/wer-normalization-guide.md) for detailed explanation.
 
-**Example:**
-```
-Reference:  "I went to the store"
-Hypothesis: "I go to store"
+---
 
-S=1 (went→go), D=1 (the missing), I=0
-WER = (1 + 1 + 0) / 5 = 0.4 (40%)
-```
+## Hardware Requirements
 
-**Learning Resources:**
-- [WER Normalization Guide](learnings/wer-normalization-guide.md) - Comprehensive guide to WER calculation and normalization
-- [Evaluation Learning Notebook](notebooks/evals_learn.ipynb) - Step-by-step WER calculation examples
+| Task | Minimum GPU | VRAM Required |
+|------|-------------|---------------|
+| Whisper Base inference | CPU or any GPU | 2-4 GB |
+| Whisper Large-v3 inference | T4 or better | 10-12 GB |
+| Parakeet-TDT 1.1B inference | A6000 recommended | ~7 GB (but needs headroom) |
+| Whisper Large-v3 fine-tuning | A6000 or better | 40+ GB |
+
+---
+
+## Contributing
+
+Contributions welcome! Areas of interest:
+- Additional STT model benchmarks
+- Audio preprocessing techniques for bandwidth-limited audio
+- Fine-tuning experiments on archival datasets
+
+---
+
+## Acknowledgments
+
+- **Library of Congress Veterans History Project** for providing the oral history collection
+- **Greg Palumbo** (Library of Congress) for VHP data access and guidance
+- AMIA 2025 for the presentation opportunity
+
+---
+
+## License
+
+This project is for research and educational purposes. The VHP audio data is subject to Library of Congress terms of use.
