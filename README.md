@@ -148,8 +148,6 @@ Word Error Rate (WER) is calculated as:
 WER = (Substitutions + Deletions + Insertions) / Total_Reference_Words
 ```
 
-See [learnings/wer-normalization-guide.md](learnings/wer-normalization-guide.md) for detailed explanation.
-
 ---
 
 ## Hardware Requirements
